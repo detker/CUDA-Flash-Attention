@@ -2,8 +2,10 @@
 
 ## Project Overview
 
-This project contains a comprehensive implementation of the Flash Attention 2 algorithm in CUDA, along with comparisons to naive attention implementations, Flash Attention 1 and PyTorch solutions. The project includes both forward pass and backward pass, enabling full training of models utilizing the attention mechanism.
+This project contains a comprehensive implementation of the Flash Attention 2 algorithm in CUDA, **utilizing CUDA Cores ONLY!**, along with comparisons to naive attention implementations, Flash Attention 1 and PyTorch solutions. The project includes both forward pass and backward pass, enabling full training of models utilizing the attention mechanism.
 Additionally, the project delivers a testing framework written in Python where experiments can be run. Several experiments are described in this README below along with results and conclusions.
+
+**NOTE**: This project is strictly educational and focuses on CUDA Cores implementation only. While functional, CUDA Cores are significantly less efficient than Tensor Cores for matrix operations like attention, resulting in much lower performance compared to production implementations. Tensor Cores provide specialized hardware for mixed-precision matrix multiplication with much higher throughput. Expansion to Tensor Core utilization is planned for future development.
 
 ### Implemented Kernels
 
@@ -237,6 +239,8 @@ python test_flash_attention2.py --mode <MODE> [OPTIONS]
 **`--output-dir`** - Output directory for results (default: `./experiment_results`)
 - Specifies where CSV files and plots are saved
 
+**`--no-gpu-reference`** - Disabling PyTorch GPU reference
+
 #### Usage Examples
 
 **Basic forward pass test with FA2:**
@@ -263,10 +267,10 @@ All experiments were performed on a RTX 5090 and 16-Core AMD CPU
 #### 1. Implementation Comparison Across Different Sizes
 
 The following implementations were tested:
-1. **PyTorch CPU** - Reference implementation on CPU
-2. **PyTorch GPU** - Scaled Dot Product Attention on GPU
-3. **Naive CUDA Kernel** - Simplest CUDA implementation
-4. **Plain Naive Attention** - Naive attention without tiling
+1. **PyTorch CPU** - Reference implementation on CPU by PyTorch team
+2. **PyTorch GPU** - Scaled Dot Product Attention on GPU by PyTorch team
+3. **Naive-Attn** - Simplest CUDA attention implementation
+4. **Naive-FA2** - Naive Flash Attention 2
 5. **Flash Attention 2 (FA2)** - Optimized implementation
 
 **Test configurations:**
@@ -323,16 +327,7 @@ Backward pass was tested for:
 3. **Flash Attention 2 Backward** - Manual backward pass implementation
 
 **Test configurations:**
-0. **Small-1**: Batch=1, Heads=1, SeqLen=128, HeadDim=64
-1. **Small-2**: Batch=2, Heads=4, SeqLen=256, HeadDim=64
-2. **Small-3**: Batch=2, Heads=8, SeqLen=256, HeadDim=64
-3. **Edge-SmallSeq**: Batch=8, Heads=16, SeqLen=32, HeadDim=64
-4. **Medium-1**: Batch=2, Heads=8, SeqLen=512, HeadDim=64
-5. **Edge-NonPowerOf2**: Batch=8, Heads=16, SeqLen=100, HeadDim=64
-6.  **Medium-2**: Batch=4, Heads=8, SeqLen=512, HeadDim=64
-7. **Large-1**: Batch=2, Heads=8, SeqLen=1024, HeadDim=64
-8. **Large-2**: Batch=4, Heads=12, SeqLen=1024, HeadDim=64
-9. **Stress-1**: Batch=8, Heads=16, SeqLen=2048, HeadDim=64
+The same as in the 1st experiment.
 
 
 | Kernel        | Mean KernelTime_ms | Mean Speedup  | Mean TFLOPS   | Mean Bandwidth_GBps |
