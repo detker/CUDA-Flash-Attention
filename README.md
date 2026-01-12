@@ -512,10 +512,3 @@ Flash Attention 2 solves the memory-bound nature of standard attention mechanism
 2. **Flash Attention 2** - Dao, T. (2023).
    "FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning"
    - Paper: https://arxiv.org/abs/2307.08691
-
-3. **Attention Is All You Need** - Vaswani, A., et al. (2017)
-   - Paper: https://arxiv.org/abs/1706.03762
-
-4. **CUDA Programming Guide** - NVIDIA
-   - Docs: https://docs.nvidia.com/cuda/cuda-c-programming-guide/
-
