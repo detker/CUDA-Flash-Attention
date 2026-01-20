@@ -138,19 +138,14 @@ Data will be saved in `data/B{batch}_H{heads}_S{seq}_D{dim}/` directory as binar
 
 ### Usage Examples
 
-#### Forward pass with Flash Attention 2:
+#### Forward pass with Flash Attention 2 + fp16 in SHM:
 ```bash
-./build/FlashAttention --compute fa2 --mode forward --data ./data/B2_H8_S512_D64
+./build/FlashAttention fa2 forward fp16 ./data/B2_H8_S512_D64
 ```
 
-#### Forward and backward pass:
+#### Forward and backward pass with FA2 + fp32 in SHM:
 ```bash
-./build/FlashAttention --compute fa2 --mode both --data ./data/B2_H8_S512_D64
-```
-
-#### Comparison with naive implementation:
-```bash
-./build/FlashAttention --compute naive --mode forward --data ./data/B2_H8_S512_D64
+./build/FlashAttention fa2 forward-backward fp32 ./data/B2_H8_S512_D64
 ```
 
 ### Output Files
