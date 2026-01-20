@@ -273,7 +273,7 @@ class FlashAttention2Tester:
         T_r = (seq_len + BLOCK_SIZE_R - 1) // BLOCK_SIZE_R
         total_blocks = batch_size * num_heads * T_r
         
-        num_threads = 128
+        num_threads = 256
 
         shared_mem = (BLOCK_SIZE_R * HEAD_DIM * 2 +  # q_buff + o_buff
                      BLOCK_SIZE_C * HEAD_DIM +       # kv_buff
@@ -776,7 +776,7 @@ class FlashAttention2Tester:
                     torch.cuda.synchronize()
                     torch_gpu_time_ms = (time.time() - torch_start) * 1000
                     gpu_pytorch_metrics = self.compute_metrics(
-                        expected_gpu.cpu().numpy(), expected_gpu.cpu().numpy(),
+                        expected_gpu.cpu().numpy(), expected.numpy(), 
                         torch_gpu_time_ms, torch_time_ms,
                         config
                     )

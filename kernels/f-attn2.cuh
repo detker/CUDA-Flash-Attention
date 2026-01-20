@@ -3,13 +3,15 @@
 #include <stdio.h>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <float.h>
 #include <cstdint>
 
 #include "error_utils.h"
 #include "timer.h"
 
-void host_flash_attention2_forward_optim(
+template<int head_dim>
+void host_flash_attention2_forward(
     const float* query,
     const float* key,
     const float* value,
@@ -18,8 +20,8 @@ void host_flash_attention2_forward_optim(
     int batch_size,
     int seq_len,
     int num_heads,
-    int head_dim,
-    TimerManager* tm);
+    TimerManager* tm
+);
 
 void host_flash_attention2_backward(
     const float* query,
@@ -35,4 +37,19 @@ void host_flash_attention2_backward(
     int seq_len,
     int num_heads,
     int head_dim,
-    TimerManager* tm);
+    TimerManager* tm
+);
+
+
+template<int head_dim>
+void host_flash_attention2_forward_f16(
+    const float* h_Q,
+    const float* h_K,
+    const float* h_V,
+    float* h_O,
+    float* h_logsumexp,
+    int batch_size,
+    int seq_len,
+    int num_heads,
+    TimerManager* tm
+);

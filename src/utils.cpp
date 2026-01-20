@@ -43,9 +43,9 @@ void parse_config_string(const char* config_str, int* batch_size, int* num_heads
 
 
 
-void parse_args(int argc, char** argv, ComputeType* compute_method, ModeType* mode, char** data_path)
+void parse_args(int argc, char** argv, ComputeDataType* compute_data_type, ComputeType* compute_method, ModeType* mode, char** data_path)
 {
-    if (argc < 4) {
+    if (argc < 5) {
         usage(argv[0]);
     }
 
@@ -79,7 +79,17 @@ void parse_args(int argc, char** argv, ComputeType* compute_method, ModeType* mo
     }
     else usage(argv[0]);
 
-    *data_path = argv[3];
+    // Parse compute data type
+    if (strcmp(argv[3], "fp16") == 0)
+    {
+        *compute_data_type = ComputeDataType::FP16;
+    }
+    else if (strcmp(argv[3], "fp32") == 0)
+    {
+        *compute_data_type = ComputeDataType::FP32;
+    }
+    else usage(argv[0]);
 
+    *data_path = argv[4];
 }
 

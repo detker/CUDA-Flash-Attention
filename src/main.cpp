@@ -18,8 +18,9 @@ int main(int argc, char** argv) {
 
     ComputeType compute_method;
     ModeType mode;
+    ComputeDataType compute_data_type;
     char* data_path;
-    parse_args(argc, argv, &compute_method, &mode, &data_path);
+    parse_args(argc, argv, &compute_data_type, &compute_method, &mode, &data_path);
 
     int batch_size, n_heads, seq_len, head_dim;
     parse_config_string(data_path, &batch_size, &n_heads, &seq_len, &head_dim);
@@ -101,7 +102,7 @@ int main(int argc, char** argv) {
         h_Q, h_K, h_V, h_O, h_logsumexp,
         h_dO, h_dQ, h_dK, h_dV,
         batch_size, n_heads, seq_len, head_dim,
-        compute_method, mode, &tm
+        compute_data_type, compute_method, mode, &tm
     );
     printf("Kernel execution completed: %.4f seconds.\n\n", tm.TotalElapsedSeconds());
 

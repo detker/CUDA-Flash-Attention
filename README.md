@@ -113,23 +113,27 @@ Data will be saved in `data/B{batch}_H{heads}_S{seq}_D{dim}/` directory as binar
 ### Basic Usage
 
 ```bash
-./build/FlashAttention --compute <METHOD> --mode <MODE> --data <DATA_PATH>
+./build/FlashAttention <METHOD> <MODE> <SHM_PRECISION> <DATA_PATH>
 ```
 
 ### Command Line Parameters
 
-#### `--compute` - Computation method:
+#### `<METHOD>` - Computation method:
 - `fa2` - Flash Attention 2 (optimized FA2 implementation)
 - `fa1` - Flash Attention 1 (base FA1 implementation)
 - `naive` - Vanilla Attention (naive implementation)
 
-#### `--mode` - Operation mode:
+#### `<MODE>` - Operation mode:
 - `forward` - Forward pass only (default)
 - `backward` - Backward pass only (requires previously computed forward pass)
 - `both` - Forward and backward pass
 
-#### `--data` - Data path:
-- Directory containing `Q.bin`, `K.bin`, `V.bin` files
+#### `<SHM_PRECISION>` – Floating-point precision for data stored in shared memory
+- `fp16` – Half precision (16-bit floating point)
+- `fp32` – Single precision (32-bit floating point)
+
+#### `<DATA_PATH>` - Data path:
+- Directory containing `Q.bin`, `K.bin`, `V.bin` for forward/forward-backward (+ `O.bin`, `logsumexp.bin` for backward) files
 - Format: `./data/B{batch}_H{heads}_S{seq}_D{dim}`
 
 ### Usage Examples

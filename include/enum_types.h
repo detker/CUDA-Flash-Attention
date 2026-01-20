@@ -11,3 +11,8 @@ enum class ModeType {
     Backward,        // Backward pass only
     ForwardBackward  // Both Forward and backward pass
 };
+
+enum class ComputeDataType {
+    FP16,            // 16-bit floating point precision
+    FP32             // 32-bit floating point precision
+};

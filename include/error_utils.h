@@ -14,6 +14,6 @@
 
 void inline usage(char* name)
 {
-    fprintf(stderr, "USAGE: %s <computation_method:naive|fa1|fa2> <mode:forward|backward|forward_backward> <data_folder_path> <output_folder_path>\n", name);
+    fprintf(stderr, "USAGE: %s <computation_method:naive|fa1|fa2> <mode:forward|backward|forward_backward> <SHM_precision:fp16|fp32> <data_folder_path>\n", name);
     exit(EXIT_FAILURE);
 }

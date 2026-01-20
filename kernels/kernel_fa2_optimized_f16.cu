@@ -2,21 +2,23 @@
 #include "f-attn2.cuh"
 #else
 #define FLT_MAX 3.402823466e+38F
+#include <cuda_fp16.h>
 #endif
+#define HALF_MAX 65504.0f 
 
 template<int BM, int BN, int HEAD_DIM>
 struct shm_t{
-    float q_buff[BM*HEAD_DIM];
-    float kv_buff[BN*HEAD_DIM];
-    float s_buff[BM*BN];
-    float o_buff[BM*HEAD_DIM];
-    float logsumexp[BM];
-    float maxes[BM];
-    float exp_norm_coeffs[BM];
+    __half q_buff[BM*HEAD_DIM];
+    __half kv_buff[BN*HEAD_DIM];
+    __half s_buff[BM*BN];
+    __half o_buff[BM*HEAD_DIM];
+    __half logsumexp[BM];
+    __half maxes[BM];
+    __half exp_norm_coeffs[BM];
 };
 
 template<int BLOCK_SIZE_R, int BLOCK_SIZE_C, int HEAD_DIM, int BK, int TM, int TN>
-__global__ void flash_attention2_forward_kernel(
+__global__ void flash_attention2_forward_kernel_f16(
     const float* __restrict__ query,
     const float* __restrict__ key,
     const float* __restrict__ value,
@@ -27,13 +29,13 @@ __global__ void flash_attention2_forward_kernel(
     int seq_len
 ) {
     extern __shared__ unsigned char shm[];
-    float *q_buff = (float*)shm;
-    float *kv_buff = (float*)(shm + sizeof(float)*BLOCK_SIZE_R*HEAD_DIM);
-    float *s_buff = (float*)(shm + sizeof(float)*BLOCK_SIZE_R*HEAD_DIM + sizeof(float)*BLOCK_SIZE_C*HEAD_DIM);
-    float *o_buff = (float*)(shm + sizeof(float)*BLOCK_SIZE_R*HEAD_DIM + sizeof(float)*BLOCK_SIZE_C*HEAD_DIM + sizeof(float)*BLOCK_SIZE_R*BLOCK_SIZE_C);
-    float *logsumexp_shm = (float*)(shm + sizeof(float)*BLOCK_SIZE_R*HEAD_DIM*2 + sizeof(float)*BLOCK_SIZE_C*HEAD_DIM + sizeof(float)*BLOCK_SIZE_R*BLOCK_SIZE_C);
-    float *maxes_shm = (float*)(shm + sizeof(float)*BLOCK_SIZE_R*HEAD_DIM*2 + sizeof(float)*BLOCK_SIZE_C*HEAD_DIM + sizeof(float)*BLOCK_SIZE_R*BLOCK_SIZE_C + sizeof(float)*BLOCK_SIZE_R);
-    float *exp_norm_coeffs = (float*)(shm + sizeof(float)*BLOCK_SIZE_R*HEAD_DIM*2 + sizeof(float)*BLOCK_SIZE_C*HEAD_DIM + sizeof(float)*BLOCK_SIZE_R*BLOCK_SIZE_C + sizeof(float)*2*BLOCK_SIZE_R);
+    __half *q_buff = (__half*)shm;
+    __half *kv_buff = (__half*)(shm + sizeof(__half)*BLOCK_SIZE_R*HEAD_DIM);
+    __half *s_buff = (__half*)(shm + sizeof(__half)*BLOCK_SIZE_R*HEAD_DIM + sizeof(__half)*BLOCK_SIZE_C*HEAD_DIM);
+    __half *o_buff = (__half*)(shm + sizeof(__half)*BLOCK_SIZE_R*HEAD_DIM + sizeof(__half)*BLOCK_SIZE_C*HEAD_DIM + sizeof(__half)*BLOCK_SIZE_R*BLOCK_SIZE_C);
+    __half *logsumexp_shm = (__half*)(shm + sizeof(__half)*BLOCK_SIZE_R*HEAD_DIM*2 + sizeof(__half)*BLOCK_SIZE_C*HEAD_DIM + sizeof(__half)*BLOCK_SIZE_R*BLOCK_SIZE_C);
+    __half *maxes_shm = (__half*)(shm + sizeof(__half)*BLOCK_SIZE_R*HEAD_DIM*2 + sizeof(__half)*BLOCK_SIZE_C*HEAD_DIM + sizeof(__half)*BLOCK_SIZE_R*BLOCK_SIZE_C + sizeof(__half)*BLOCK_SIZE_R);
+    __half *exp_norm_coeffs = (__half*)(shm + sizeof(__half)*BLOCK_SIZE_R*HEAD_DIM*2 + sizeof(__half)*BLOCK_SIZE_C*HEAD_DIM + sizeof(__half)*BLOCK_SIZE_R*BLOCK_SIZE_C + sizeof(__half)*2*BLOCK_SIZE_R);
     
     int tid = threadIdx.x;
     const int T_r = (seq_len + BLOCK_SIZE_R - 1) / BLOCK_SIZE_R; //q,o
@@ -56,28 +58,37 @@ __global__ void flash_attention2_forward_kernel(
                                 HEAD_IDX * (seq_len * HEAD_DIM) + 
                                 Q_TILE_IDX * BLOCK_SIZE_R * HEAD_DIM;
 
-    float4 *q_buff_f4 = reinterpret_cast<float4 *>(q_buff);
+    __half2 *q_buff_f4 = reinterpret_cast<__half2 *>(q_buff);
     // load Q tile to SHM
     #pragma unroll
-    for(int x = tid; x < BLOCK_SIZE_R * HEAD_DIM / 4; x += blockDim.x)
+    for(int x = tid; x < BLOCK_SIZE_R * HEAD_DIM / 2; x += blockDim.x)
     {
-        int local_row = x*4 / (HEAD_DIM);
-        int local_col = (x*4) % (HEAD_DIM);
+        int local_row = x*2 / (HEAD_DIM);
+        int local_col = (x*2) % (HEAD_DIM);
         
         int global_seq_idx = Q_TILE_IDX * BLOCK_SIZE_R + local_row;
         
-        if (global_seq_idx < seq_len && local_col + 3 < HEAD_DIM) {
+        if (global_seq_idx < seq_len && local_col + 1 < HEAD_DIM) {
             int idx = base_hbm_offset + local_row * HEAD_DIM + local_col;
-            q_buff_f4[x] = __ldg(reinterpret_cast<const float4*>(&query[idx]));
+            float2 q_vals = __ldg(reinterpret_cast<const float2*>(&query[idx]));
+            q_buff_f4[x] = __float22half2_rn(q_vals);
+            // q_buff_f4[x] = __ldg(reinterpret_cast<const __half2*>(&query[idx]));
         } else {
-            q_buff_f4[x] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            q_buff_f4[x] = make_half2(__float2half(0.0f), __float2half(0.0f));
         }
+
+        #pragma unroll
+        for(int x = tid; x < BLOCK_SIZE_R * HEAD_DIM; x += blockDim.x)
+        {
+            o_buff[x] = __float2half(0.0f);
+        }
+
 
         if(local_col == 0 && local_row < BLOCK_SIZE_R)
         {
-            logsumexp_shm[local_row] = 0.0f;
-            maxes_shm[local_row] = -FLT_MAX;
-            o_buff[local_row * HEAD_DIM] = 0.0f; 
+            logsumexp_shm[local_row] = __float2half(0.0f);
+            maxes_shm[local_row] = __float2half(-FLT_MAX);
+            // o_buff[local_row * HEAD_DIM] = __float2half(0.0f); 
         }
     }
 
@@ -90,32 +101,35 @@ __global__ void flash_attention2_forward_kernel(
         int kv_block_start = j * BLOCK_SIZE_C;
         
         #pragma unroll
-        for(int x = tid; x < BLOCK_SIZE_C * HEAD_DIM / 4; x += blockDim.x)
+        for(int x = tid; x < BLOCK_SIZE_C * HEAD_DIM / 2; x += blockDim.x)
         {
-            int local_row = (x * 4) / HEAD_DIM;
-            int local_col = (x * 4) % HEAD_DIM;
+            int local_row = (x * 2) / HEAD_DIM;
+            int local_col = (x * 2) % HEAD_DIM;
             
             int global_seq_idx = kv_block_start + local_row;
             
-            if (global_seq_idx < seq_len && local_col + 3 < HEAD_DIM) {
+            if (global_seq_idx < seq_len && local_col + 1 < HEAD_DIM) {
                 int idx = base_hbm_offset_kv + global_seq_idx * HEAD_DIM + local_col;
 
-                float4 k_val_f4 = __ldg(reinterpret_cast<const float4*>(&key[idx]));
+                float2 k_val_f2 = __ldg(reinterpret_cast<const float2*>(&key[idx]));
+                __half2 k_val_f2_h = __float22half2_rn(k_val_f2);
+                // __half2 k_val_f4 = __ldg(reinterpret_cast<const __half2*>(&key[idx]));
 
                 // K transposed in shared memory
-                kv_buff[(local_col + 0) * BLOCK_SIZE_C + local_row] = k_val_f4.x;
-                kv_buff[(local_col + 1) * BLOCK_SIZE_C + local_row] = k_val_f4.y;
-                kv_buff[(local_col + 2) * BLOCK_SIZE_C + local_row] = k_val_f4.z;
-                kv_buff[(local_col + 3) * BLOCK_SIZE_C + local_row] = k_val_f4.w;
+                kv_buff[(local_col + 0) * BLOCK_SIZE_C + local_row] = k_val_f2_h.x;
+                kv_buff[(local_col + 1) * BLOCK_SIZE_C + local_row] = k_val_f2_h.y;
+                // kv_buff[(local_col + 2) * BLOCK_SIZE_C + local_row] = k_val_f4.z;
+                // kv_buff[(local_col + 3) * BLOCK_SIZE_C + local_row] = k_val_f4.w;
             } else if (global_seq_idx < seq_len) {
-                for(int d = local_col; d < HEAD_DIM && d < local_col + 4; ++d) {
+                for(int d = local_col; d < HEAD_DIM && d < local_col + 2; ++d) {
                     int idx = base_hbm_offset_kv + global_seq_idx * HEAD_DIM + d;
-                    kv_buff[d * BLOCK_SIZE_C + local_row] = __ldg(&key[idx]);
+                    float key_val_f = __ldg(&key[idx]);
+                    kv_buff[d * BLOCK_SIZE_C + local_row] = __float2half(key_val_f);
                 }
             } else {
                 // Zero padding
-                for(int d = local_col; d < local_col + 4 && d < HEAD_DIM; ++d) {
-                    kv_buff[d * BLOCK_SIZE_C + local_row] = 0.0f;
+                for(int d = local_col; d < local_col + 2 && d < HEAD_DIM; ++d) {
+                    kv_buff[d * BLOCK_SIZE_C + local_row] = __float2half(0.0f);
                 }
             }
         } 
@@ -139,7 +153,7 @@ __global__ void flash_attention2_forward_kernel(
                 for (unsigned int i = 0; i < TM; ++i) {
                     unsigned int qRow = threadRow * TM + i;
                     if (qRow < BLOCK_SIZE_R) {
-                        regQ[i] = q_buff[qRow * HEAD_DIM + d];
+                        regQ[i] = __half2float(q_buff[qRow * HEAD_DIM + d]);
                     }
                 }
 
@@ -148,7 +162,7 @@ __global__ void flash_attention2_forward_kernel(
                 for (unsigned int i = 0; i < TN; ++i) {
                     unsigned int kCol = threadCol * TN + i;
                     if (kCol < BLOCK_SIZE_C) {
-                        regK[i] = kv_buff[d * BLOCK_SIZE_C + kCol];
+                        regK[i] = __half2float(kv_buff[d * BLOCK_SIZE_C + kCol]);
                     }
                 }
 
@@ -169,7 +183,6 @@ __global__ void flash_attention2_forward_kernel(
             unsigned int globalRow = threadRow * TM + resIdx_M;
             if (globalRow >= BLOCK_SIZE_R) continue;
             
-            // niepotrzebne i guess
            unsigned int global_q_idx = Q_TILE_IDX * BLOCK_SIZE_R + globalRow;
             if (global_q_idx >= seq_len) continue;
 
@@ -180,10 +193,10 @@ __global__ void flash_attention2_forward_kernel(
 
                 unsigned int global_kv_idx = j * BLOCK_SIZE_C + globalCol;
                 if (global_kv_idx >= seq_len) {
-                    s_buff[globalRow * BLOCK_SIZE_C + globalCol] = -FLT_MAX;
+                    s_buff[globalRow * BLOCK_SIZE_C + globalCol] = __float2half(-FLT_MAX);
                 } else {
                     s_buff[globalRow * BLOCK_SIZE_C + globalCol] = 
-                        threadS[resIdx_M * TN + resIdx_N] / sqrt_head_dim;
+                        __float2half(threadS[resIdx_M * TN + resIdx_N] / sqrt_head_dim);
                 }
             }
         }
@@ -200,7 +213,7 @@ __global__ void flash_attention2_forward_kernel(
             #pragma unroll
             for(int col = LANE_ID; col < BLOCK_SIZE_C; col += 32)
             {
-                row_max = fmaxf(row_max, s_buff[row * BLOCK_SIZE_C + col]);   
+                row_max = fmaxf(row_max, __half2float(s_buff[row * BLOCK_SIZE_C + col]));   
             }
 
             // warp reduction to find max
@@ -212,30 +225,34 @@ __global__ void flash_attention2_forward_kernel(
 
             float new_max = 0.0f;
             float coeff = 0.0f;
+            float old_max = __half2float(maxes_shm[row]);
             if (LANE_ID == 0)
             {
-                new_max = fmaxf(maxes_shm[row], row_max);
-                coeff = __expf(maxes_shm[row] - new_max);
-                maxes_shm[row] = new_max;
-                exp_norm_coeffs[row] = coeff;
+                new_max = fmaxf(old_max, row_max);
+                coeff = __expf(old_max - new_max);
+                maxes_shm[row] = __float2half(new_max);
+                exp_norm_coeffs[row] = __float2half(coeff);
             }
 
             new_max = __shfl_sync(0xFFFFFFFF, new_max, 0);
             coeff = __shfl_sync(0xFFFFFFFF, coeff, 0);
 
-            #pragma unroll
-            for(int col = LANE_ID; col < BLOCK_SIZE_C; col += 32)
-            {
-                float val = s_buff[row * BLOCK_SIZE_C + col];
-                s_buff[row * BLOCK_SIZE_C + col] = __expf(val - new_max);
-            }
-
             float row_sum = 0.0f;
             #pragma unroll
             for(int col = LANE_ID; col < BLOCK_SIZE_C; col += 32)
             {
-                row_sum += s_buff[row * BLOCK_SIZE_C + col];
+                float val = __half2float(s_buff[row * BLOCK_SIZE_C + col]);
+                val = __expf(val - new_max);
+                s_buff[row * BLOCK_SIZE_C + col] = __float2half(val);
+                row_sum += val;
             }
+
+            // float row_sum = 0.0f;
+            // #pragma unroll
+            // for(int col = LANE_ID; col < BLOCK_SIZE_C; col += 32)
+            // {
+            //     row_sum += s_buff[row * BLOCK_SIZE_C + col];
+            // }
 
             // warp reduction to find sum
             #pragma unroll
@@ -246,35 +263,34 @@ __global__ void flash_attention2_forward_kernel(
 
             if (LANE_ID == 0)
             {
-                logsumexp_shm[row] = coeff * logsumexp_shm[row] + row_sum;
+                logsumexp_shm[row] = __float2half(coeff * __half2float(logsumexp_shm[row]) + row_sum);
             }
         }
         __syncthreads();
 
 
-
-
         #pragma unroll
-        for(int x = tid; x < BLOCK_SIZE_C * HEAD_DIM / 4; x += blockDim.x)
+        for(int x = tid; x < BLOCK_SIZE_C * HEAD_DIM / 2; x += blockDim.x)
         {
-            int local_row = (x * 4) / HEAD_DIM;
-            int local_col = (x * 4) % HEAD_DIM;
+            int local_row = (x * 2) / HEAD_DIM;
+            int local_col = (x * 2) % HEAD_DIM;
             
             int global_seq_idx = kv_block_start + local_row;
             
-            if (global_seq_idx < seq_len && local_col + 3 < HEAD_DIM) {
+            if (global_seq_idx < seq_len && local_col + 1 < HEAD_DIM) {
                 int idx = base_hbm_offset_kv + global_seq_idx * HEAD_DIM + local_col;
-                float4 v_val_f4 = __ldg(reinterpret_cast<const float4*>(&value[idx]));
-                *reinterpret_cast<float4*>(&kv_buff[local_row * HEAD_DIM + local_col]) = v_val_f4;
+                float2 v_val_f2 = __ldg(reinterpret_cast<const float2*>(&value[idx]));
+                *reinterpret_cast<__half2*>(&kv_buff[local_row * HEAD_DIM + local_col]) = __float22half2_rn(v_val_f2);
             } else if (global_seq_idx < seq_len) {
-                for(int d = local_col; d < HEAD_DIM && d < local_col + 4; ++d) {
+                for(int d = local_col; d < HEAD_DIM && d < local_col + 1; ++d) {
                     int idx = base_hbm_offset_kv + global_seq_idx * HEAD_DIM + d;
-                    kv_buff[local_row * HEAD_DIM + d] = __ldg(&value[idx]);
+                    float val = __ldg(&value[idx]);
+                    kv_buff[local_row * HEAD_DIM + d] = __float2half(val);
                 }
             } else {
                 // zero padding
-                for(int d = local_col; d < local_col + 4 && d < HEAD_DIM; ++d) {
-                    kv_buff[local_row * HEAD_DIM + d] = 0.0f;
+                for(int d = local_col; d < local_col + 1 && d < HEAD_DIM; ++d) {
+                    kv_buff[local_row * HEAD_DIM + d] = __float2half(0.0f);
                 }
             }
         } 
@@ -289,7 +305,7 @@ __global__ void flash_attention2_forward_kernel(
             unsigned int global_seq_idx = Q_TILE_IDX * BLOCK_SIZE_R + row;
             if (global_seq_idx >= seq_len) continue;
 
-            float coeff = exp_norm_coeffs[row];
+            float coeff = __half2float(exp_norm_coeffs[row]);
             
             #pragma unroll
             for (unsigned int dIdx = threadCol * BK; dIdx < HEAD_DIM; dIdx += (BLOCK_SIZE_C / TN) * BK) {
@@ -297,13 +313,13 @@ __global__ void flash_attention2_forward_kernel(
                 
                 #pragma unroll
                 for (unsigned int c = 0; c < BLOCK_SIZE_C; ++c) {
-                    float s_val = s_buff[row * BLOCK_SIZE_C + c];
+                    float s_val = __half2float(s_buff[row * BLOCK_SIZE_C + c]);
                     
                     #pragma unroll
                     for (unsigned int i = 0; i < BK; ++i) {
                         unsigned int d = dIdx + i;
                         if (d < HEAD_DIM) {
-                            accum[i] += s_val * kv_buff[c * HEAD_DIM + d];
+                            accum[i] += s_val * __half2float(kv_buff[c * HEAD_DIM + d]);
                         }
                     }
                 }
@@ -313,7 +329,7 @@ __global__ void flash_attention2_forward_kernel(
                     unsigned int d = dIdx + i;
                     if (d < HEAD_DIM) {
                         unsigned int idx = row * HEAD_DIM + d;
-                        o_buff[idx] = o_buff[idx] * coeff + accum[i];
+                        o_buff[idx] = __float2half(__half2float(o_buff[idx]) * coeff + accum[i]);
                     }
                 }
             }
@@ -329,13 +345,12 @@ __global__ void flash_attention2_forward_kernel(
         int global_seq_idx = Q_TILE_IDX * BLOCK_SIZE_R + local_row;
         if (global_seq_idx < seq_len) {
             int idx = base_hbm_offset + local_row * HEAD_DIM + local_col;
-            output[idx] = o_buff[local_row * HEAD_DIM + local_col] / logsumexp_shm[local_row];
-
+            output[idx] = __half2float(o_buff[local_row * HEAD_DIM + local_col]) / __half2float(logsumexp_shm[local_row]);
             if(local_col == 0)
             {
                 logsumexp[BATCH_IDX * num_heads * seq_len + 
                                HEAD_IDX * seq_len + 
-                               global_seq_idx] = __logf(logsumexp_shm[local_row]) + maxes_shm[local_row];
+                               global_seq_idx] = __logf(__half2float(logsumexp_shm[local_row])) + __half2float(maxes_shm[local_row]);
             }
         }
     }
@@ -343,7 +358,7 @@ __global__ void flash_attention2_forward_kernel(
 
 #ifndef CUPY_INLINE_COMPILE
 template<int head_dim>
-void host_flash_attention2_forward(
+void host_flash_attention2_forward_f16(
     const float* h_Q,
     const float* h_K,
     const float* h_V,
@@ -381,7 +396,7 @@ void host_flash_attention2_forward(
     
     const int HEAD_DIM = 64;
     const int BLOCK_SIZE_C = 32;
-    const int BLOCK_SIZE_R = 32;
+    const int BLOCK_SIZE_R = 64;
     const int BK = 4;             // tile size for head_dim dimension
     const int TM = 4;             // each thread handles TM rows
     const int TN = 4;             // each thread handles TN cols
@@ -389,7 +404,7 @@ void host_flash_attention2_forward(
     const size_t T_r = (seq_len + BLOCK_SIZE_R - 1) / BLOCK_SIZE_R;
     const size_t total_blocks = batch_size * num_heads * T_r;
     // const size_t num_threads_per_block = (BLOCK_SIZE_R * BLOCK_SIZE_C) / (TM * TN);
-    const size_t num_threads_per_block = 128;
+    const size_t num_threads_per_block = 256;
     
     const int shared_mem_size = sizeof(shm_t<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>);
     
@@ -398,7 +413,7 @@ void host_flash_attention2_forward(
     printf("Total blocks: %zu\n", total_blocks);
     
     tm->Start();
-    flash_attention2_forward_kernel<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM, BK, TM, TN>
+    flash_attention2_forward_kernel_f16<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM, BK, TM, TN>
                                   <<<total_blocks, num_threads_per_block, shared_mem_size>>>(
                                     d_Q, d_K, d_V, d_O, d_logsumexp,
                                     batch_size, num_heads, seq_len
@@ -417,13 +432,14 @@ void host_flash_attention2_forward(
     CUDA_CHECK(cudaFree(d_O));
     CUDA_CHECK(cudaFree(d_logsumexp));
 }
+
 using FA2F16Func = void(const float*, const float*, const float*, float*, float*, int, int, int, TimerManager*);
-template FA2F16Func host_flash_attention2_forward<32>;
-template FA2F16Func host_flash_attention2_forward<64>;
-template FA2F16Func host_flash_attention2_forward<128>;
+template FA2F16Func host_flash_attention2_forward_f16<32>;
+template FA2F16Func host_flash_attention2_forward_f16<64>;
+template FA2F16Func host_flash_attention2_forward_f16<128>;
 #else
 extern "C" __global__
-void flash_attention2_forward_kernel_wrapper(
+void flash_attention2_forward_kernel_wrapper_f16(
     const float* query,
     const float* key,
     const float* value,
@@ -434,7 +450,7 @@ void flash_attention2_forward_kernel_wrapper(
     const int seq_len,
     const int head_dim
 ) {
-    flash_attention2_forward_kernel<32, 32, 64, 4, 4, 4>(
+    flash_attention2_forward_kernel_f16<64, 32, 64, 4, 4, 4>(
         query, key, value, output, logsumexp,
         batch_size, num_heads, seq_len
     );

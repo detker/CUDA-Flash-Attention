@@ -15,12 +15,17 @@ struct FlashAttentionDispatcher
     static void dispatch_forward(
         const float* Q, const float* K, const float* V, float* O, float *logsumexp,
         int batch_size, int num_heads, int seq_len,
-        ComputeType compute_method, TimerManager* tm) 
+        ComputeDataType compute_data_type, ComputeType compute_method, TimerManager* tm) 
     {
         if (compute_method == ComputeType::FlashAttention2)
         {
-            printf("Running Flash Attention 2 Forward (HEAD_DIM=%d)...\n", HEAD_DIM);
-            host_flash_attention2_forward_optim(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, HEAD_DIM, tm);
+            if (compute_data_type == ComputeDataType::FP16) {
+                printf("Running Flash Attention 2 Forward (HEAD_DIM=%d) with FP16 data stored in SHM...\n", HEAD_DIM);
+                host_flash_attention2_forward_f16<HEAD_DIM>(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, tm);
+            } else {
+                printf("Running Flash Attention 2 Forward (HEAD_DIM=%d)...\n", HEAD_DIM);
+                host_flash_attention2_forward<HEAD_DIM>(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, tm);
+            }
         }
         else if (compute_method == ComputeType::FlashAttention1)
         {
@@ -73,11 +78,11 @@ struct FlashAttentionDispatcher
         const float* Q, const float* K, const float* V, float* O, float* logsumexp,
         const float* dO, float* dQ, float* dK, float* dV,
         int batch_size, int num_heads, int seq_len,
-        ComputeType compute_method, TimerManager* tm) 
+        ComputeDataType compute_data_type, ComputeType compute_method, TimerManager* tm) 
     {
         printf("Running Forward+Backward Pass (HEAD_DIM=%d)...\n", HEAD_DIM);
         
-        dispatch_forward(Q, K, V, O, logsumexp, batch_size, num_heads, seq_len, compute_method, tm);
+        dispatch_forward(Q, K, V, O, logsumexp, batch_size, num_heads, seq_len, compute_data_type, compute_method, tm);
         
         dispatch_backward(Q, K, V, O, dO, logsumexp, dQ, dK, dV, 
                          batch_size, num_heads, seq_len, compute_method, tm);
@@ -129,6 +134,7 @@ struct ForwardPassLauncher
     int batch_size;
     int num_heads;
     int seq_len;
+    ComputeDataType compute_data_type;
     ComputeType compute_method;
     TimerManager* tm;
 
@@ -136,7 +142,7 @@ struct ForwardPassLauncher
     void operator()() const 
     {
         FlashAttentionDispatcher<HEAD_DIM>::dispatch_forward(
-            Q, K, V, O, logsumexp, batch_size, num_heads, seq_len, compute_method, tm);
+            Q, K, V, O, logsumexp, batch_size, num_heads, seq_len, compute_data_type, compute_method, tm);
     }
 };
 
@@ -180,6 +186,7 @@ struct ForwardBackwardPassLauncher
     int batch_size;
     int num_heads;
     int seq_len;
+    ComputeDataType compute_data_type;
     ComputeType compute_method;
     TimerManager* tm;
 
@@ -188,7 +195,8 @@ struct ForwardBackwardPassLauncher
     {
         FlashAttentionDispatcher<HEAD_DIM>::dispatch_forward_backward(
             Q, K, V, O, logsumexp, dO, dQ, dK, dV,
-            batch_size, num_heads, seq_len, compute_method, tm);
+            batch_size, num_heads, seq_len, 
+            compute_data_type, compute_method, tm);
     }
 };
 
@@ -196,14 +204,14 @@ inline void RunFlashAttention(
     const float* Q, const float* K, const float* V, float* O, float* logsumexp,
     const float* dO, float* dQ, float* dK, float* dV,
     int batch_size, int num_heads, int seq_len, int head_dim,
-    ComputeType compute_method, ModeType mode, TimerManager* tm) 
+    ComputeDataType compute_data_type, ComputeType compute_method, ModeType mode, TimerManager* tm) 
 {
     static constexpr int MIN_HEAD_DIM = 32;
-    static constexpr int MAX_HEAD_DIM = 256;
+    static constexpr int MAX_HEAD_DIM = 128;
 
     if (mode == ModeType::Forward)
     {
-        ForwardPassLauncher launcher{Q, K, V, O, logsumexp, batch_size, num_heads, seq_len, compute_method, tm};
+        ForwardPassLauncher launcher{Q, K, V, O, logsumexp, batch_size, num_heads, seq_len, compute_data_type, compute_method, tm};
         RuntimeDimDispatcher<MIN_HEAD_DIM, MAX_HEAD_DIM>::dispatch(head_dim, launcher);
     }
     else if (mode == ModeType::Backward)
@@ -215,7 +223,7 @@ inline void RunFlashAttention(
     else if (mode == ModeType::ForwardBackward)
     {
         ForwardBackwardPassLauncher launcher{Q, K, V, O, logsumexp, dO, dQ, dK, dV,
-                                            batch_size, num_heads, seq_len, compute_method, tm};
+                                            batch_size, num_heads, seq_len, compute_data_type, compute_method, tm};
         RuntimeDimDispatcher<MIN_HEAD_DIM, MAX_HEAD_DIM>::dispatch(head_dim, launcher);
     }
 }
