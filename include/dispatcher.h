@@ -55,7 +55,7 @@ struct FlashAttentionDispatcher
         {
             if (compute_data_type == ComputeDataType::FP16) {
                 printf("Running Flash Attention 2 Backward (HEAD_DIM=%d) with FP16 data stored in SHM...\n", HEAD_DIM);
-                host_flash_attention2_backward<HEAD_DIM>(Q, K, V, O, dO, logsumexp, dQ, dK, dV, batch_size, seq_len, num_heads, tm);
+                host_flash_attention2_backward_fp16<HEAD_DIM>(Q, K, V, O, dO, logsumexp, dQ, dK, dV, batch_size, seq_len, num_heads, tm);
             } 
             else 
             {

@@ -93,9 +93,15 @@ __global__ void flash_attention2_backward_kernel(
         if (global_seq_idx < seq_len && local_col + 3 < HEAD_DIM) {
             int idx = base_hbm_offset + local_row * HEAD_DIM + local_col;
             k_buff_f4[x] = __ldg(reinterpret_cast<const float4 *>(&key[idx]));
-            v_buff_f4[x] = __ldg(reinterpret_cast<const float4 *>(&value[idx]));
+            float4 v_val_f4 = __ldg(reinterpret_cast<const float4 *>(&value[idx]));
+            v_buff[(local_col + 0) * BLOCK_SIZE_C + local_row] = v_val_f4.x;
+            v_buff[(local_col + 1) * BLOCK_SIZE_C + local_row] = v_val_f4.y;
+            v_buff[(local_col + 2) * BLOCK_SIZE_C + local_row] = v_val_f4.z;
+            v_buff[(local_col + 3) * BLOCK_SIZE_C + local_row] = v_val_f4.w;
+            // v_buff_f4[x] = __ldg(reinterpret_cast<const float4 *>(&value[idx]));
         } else {
             k_buff_f4[x] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+
             v_buff_f4[x] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
         }
 
@@ -240,7 +246,7 @@ __global__ void flash_attention2_backward_kernel(
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d)
                 {
-                    d_p_ij += d_o_buff[row * HEAD_DIM + d] * v_buff[col * HEAD_DIM + d]; 
+                    d_p_ij += d_o_buff[row * HEAD_DIM + d] * v_buff[d * BLOCK_SIZE_C + col]; 
                 }
                 p_buff[row * BLOCK_SIZE_C + col] = (d_p_ij - logsumexp_d_shm[row]) * p_buff[row * BLOCK_SIZE_C + col] / sqrt_head_dim;
             }

@@ -98,10 +98,12 @@ __global__ void flash_attention2_backward_kernel_fp16(
             float v0 = __ldg(&value[idx]);
             float v1 = __ldg(&value[idx + 1]);
             k_buff_h2[x] = make_half2(__float2half(k0), __float2half(k1));
-            v_buff_h2[x] = make_half2(__float2half(v0), __float2half(v1));
+            v_buff[(local_col + 0) * BLOCK_SIZE_C + local_row] = __float2half(v0);
+            v_buff[(local_col + 1) * BLOCK_SIZE_C + local_row] = __float2half(v1);
         } else {
+            v_buff[(local_col + 0) * BLOCK_SIZE_C + local_row] = __float2half(0.0f);                                                                       
+            v_buff[(local_col + 1) * BLOCK_SIZE_C + local_row] = __float2half(0.0f); 
             k_buff_h2[x] = make_half2(__float2half(0.0f), __float2half(0.0f));
-            v_buff_h2[x] = make_half2(__float2half(0.0f), __float2half(0.0f));
         }
 
         // also initialize the derivative buffers to zero
@@ -245,7 +247,7 @@ __global__ void flash_attention2_backward_kernel_fp16(
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d)
                 {
-                    d_p_ij += __half2float(d_o_buff[row * HEAD_DIM + d]) * __half2float(v_buff[col * HEAD_DIM + d]); 
+                    d_p_ij += __half2float(d_o_buff[row * HEAD_DIM + d]) * __half2float(v_buff[d * BLOCK_SIZE_C + col]); 
                 }
                 p_buff[row * BLOCK_SIZE_C + col] = __float2half((d_p_ij - __half2float(logsumexp_d_shm[row])) * __half2float(p_buff[row * BLOCK_SIZE_C + col]) / sqrt_head_dim);
             }
