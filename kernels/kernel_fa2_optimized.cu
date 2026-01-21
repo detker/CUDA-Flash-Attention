@@ -417,10 +417,10 @@ void host_flash_attention2_forward(
     CUDA_CHECK(cudaFree(d_O));
     CUDA_CHECK(cudaFree(d_logsumexp));
 }
-using FA2F16Func = void(const float*, const float*, const float*, float*, float*, int, int, int, TimerManager*);
-template FA2F16Func host_flash_attention2_forward<32>;
-template FA2F16Func host_flash_attention2_forward<64>;
-template FA2F16Func host_flash_attention2_forward<128>;
+using FA2F32Func = void(const float*, const float*, const float*, float*, float*, int, int, int, TimerManager*);
+template FA2F32Func host_flash_attention2_forward<32>;
+template FA2F32Func host_flash_attention2_forward<64>;
+template FA2F32Func host_flash_attention2_forward<128>;
 #else
 extern "C" __global__
 void flash_attention2_forward_kernel_wrapper(

@@ -128,7 +128,7 @@ Data will be saved in `data/B{batch}_H{heads}_S{seq}_D{dim}/` directory as binar
 - `backward` - Backward pass only (requires previously computed forward pass)
 - `both` - Forward and backward pass
 
-#### `<SHM_PRECISION>` – Floating-point precision for data stored in shared memory
+#### `<SHM_PRECISION>` – Floating-point precision for data stored in shared memory (implemented only for FA2 both forward and backward pass)
 - `fp16` – Half precision (16-bit floating point)
 - `fp32` – Single precision (32-bit floating point)
 
@@ -271,6 +271,8 @@ The following implementations were tested:
 3. **Naive-Attn** - Simplest CUDA attention implementation
 4. **Naive-FA2** - Naive Flash Attention 2
 5. **Flash Attention 2 (FA2)** - Optimized implementation
+
+All algorithms were executed using single-precision floating-point arithmetic (FP32).
 
 **Test configurations:**
 0. **Small-1**: Batch=1, Heads=1, SeqLen=128, HeadDim=64
@@ -441,15 +443,17 @@ CUDA-flash-attention/
 │   ├── timer.h                # GPU and CPU timer
 │   └── utils.h                # Utilities (I/O, parsing)
 │
-├── kernels/                       # CUDA kernel implementations
-│   ├── kernel_fa2_optimized.cu    # Flash Attention 2 (forward)
-│   ├── f-attn2-backward.cu        # Flash Attention 2 (backward)
-│   ├── f-attn2.cuh                # FA2 header
-│   ├── f-attn.cu                  # Flash Attention 1
-│   ├── f-attn.cuh                 # FA1 header
-│   ├── vanilla-attn.cu            # Vanilla attention
-│   ├── vanilla-attn.cuh           # Vanilla header
-│   └── plain-attn.cu              # Base, Naive FA2 forward
+├── kernels/                            # CUDA kernel implementations
+│   ├── kernel_fa2_optimized.cu         # Flash Attention 2 (forward)
+│   ├── kernel_fa2_optimized_f16.cu     # Flash Attention 2 (forward) + fp16 in SHM
+│   ├── f-attn2-backward.cu             # Flash Attention 2 (backward)
+│   ├── f-attn2-backward_f16.cu         # Flash Attention 2 (backward) + fp16 in SHM
+│   ├── f-attn2.cuh                     # FA2 header
+│   ├── f-attn.cu                       # Flash Attention 1
+│   ├── f-attn.cuh                      # FA1 header
+│   ├── vanilla-attn.cu                 # Vanilla attention
+│   ├── vanilla-attn.cuh                # Vanilla header
+│   └── plain-attn.cu                   # Base, Naive FA2 forward
 │
 ├── src/                       # C++ source code
 │   ├── main.cpp               # Main program function
@@ -497,7 +501,7 @@ Flash Attention 2 solves the memory-bound nature of standard attention mechanism
 - It's CUDA Cores implementation ONLY
 
 ## **Possible Improvements:**
-- Mixed precision support (FP16/BF16)
+- BF16 precision support
 - Tensor Core implementation
 - GEMM optimizations 
 

@@ -21,7 +21,7 @@ struct FlashAttentionDispatcher
         {
             if (compute_data_type == ComputeDataType::FP16) {
                 printf("Running Flash Attention 2 Forward (HEAD_DIM=%d) with FP16 data stored in SHM...\n", HEAD_DIM);
-                host_flash_attention2_forward_f16<HEAD_DIM>(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, tm);
+                host_flash_attention2_forward_fp16<HEAD_DIM>(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, tm);
             } else {
                 printf("Running Flash Attention 2 Forward (HEAD_DIM=%d)...\n", HEAD_DIM);
                 host_flash_attention2_forward<HEAD_DIM>(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, tm);
@@ -49,13 +49,19 @@ struct FlashAttentionDispatcher
         const float* dO, const float* logsumexp,
         float* dQ, float* dK, float* dV,
         int batch_size, int num_heads, int seq_len,
-        ComputeType compute_method, TimerManager* tm) 
+        ComputeDataType compute_data_type, ComputeType compute_method, TimerManager* tm) 
     {
         if (compute_method == ComputeType::FlashAttention2)
         {
-            printf("Running Flash Attention 2 Backward (HEAD_DIM=%d)...\n", HEAD_DIM);
-            host_flash_attention2_backward(Q, K, V, O, dO, logsumexp, dQ, dK, dV, 
-                                          batch_size, seq_len, num_heads, HEAD_DIM, tm);
+            if (compute_data_type == ComputeDataType::FP16) {
+                printf("Running Flash Attention 2 Backward (HEAD_DIM=%d) with FP16 data stored in SHM...\n", HEAD_DIM);
+                host_flash_attention2_backward<HEAD_DIM>(Q, K, V, O, dO, logsumexp, dQ, dK, dV, batch_size, seq_len, num_heads, tm);
+            } 
+            else 
+            {
+                printf("Running Flash Attention 2 Backward (HEAD_DIM=%d)...\n", HEAD_DIM);
+                host_flash_attention2_backward<HEAD_DIM>(Q, K, V, O, dO, logsumexp, dQ, dK, dV, batch_size, seq_len, num_heads, tm);
+            }
         }
         else if (compute_method == ComputeType::FlashAttention1)
         {
@@ -85,7 +91,8 @@ struct FlashAttentionDispatcher
         dispatch_forward(Q, K, V, O, logsumexp, batch_size, num_heads, seq_len, compute_data_type, compute_method, tm);
         
         dispatch_backward(Q, K, V, O, dO, logsumexp, dQ, dK, dV, 
-                         batch_size, num_heads, seq_len, compute_method, tm);
+                          batch_size, num_heads, seq_len, 
+                          compute_data_type, compute_method, tm);
     }
 };
 
@@ -160,6 +167,7 @@ struct BackwardPassLauncher
     int batch_size;
     int num_heads;
     int seq_len;
+    ComputeDataType compute_data_type;
     ComputeType compute_method;
     TimerManager* tm;
 
@@ -168,7 +176,7 @@ struct BackwardPassLauncher
     {
         FlashAttentionDispatcher<HEAD_DIM>::dispatch_backward(
             Q, K, V, O, dO, logsumexp, dQ, dK, dV, 
-            batch_size, num_heads, seq_len, compute_method, tm);
+            batch_size, num_heads, seq_len, compute_data_type, compute_method, tm);
     }
 };
 
@@ -217,7 +225,7 @@ inline void RunFlashAttention(
     else if (mode == ModeType::Backward)
     {
         BackwardPassLauncher launcher{Q, K, V, O, dO, logsumexp, dQ, dK, dV, 
-                                     batch_size, num_heads, seq_len, compute_method, tm};
+                                     batch_size, num_heads, seq_len, compute_data_type, compute_method, tm};
         RuntimeDimDispatcher<MIN_HEAD_DIM, MAX_HEAD_DIM>::dispatch(head_dim, launcher);
     }
     else if (mode == ModeType::ForwardBackward)

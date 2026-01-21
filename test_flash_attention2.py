@@ -199,7 +199,7 @@ class FlashAttention2Tester:
         head_dim = Q.shape[-1]
         
         attn_scores = torch.matmul(Q, K.transpose(-2, -1))
-        attn_scores = attn_scores / np.sqrt(head_dim)
+        attn_scores = attn_scores / (head_dim ** 0.5)
         
         attn_weights = F.softmax(attn_scores, dim=-1)
         
@@ -617,9 +617,9 @@ class FlashAttention2Tester:
         
         try:
             Q, K, V = self.generate_test_data(config)
-            Q_gpu = Q.cuda()
-            K_gpu = K.cuda()
-            V_gpu = V.cuda()
+            Q_gpu = Q.cuda().requires_grad_(True)
+            K_gpu = K.cuda().requires_grad_(True)
+            V_gpu = V.cuda().requires_grad_(True)
             
             if config.test_backward:
                 # test backward pass
@@ -658,38 +658,53 @@ class FlashAttention2Tester:
             
                     expected_out_gpu.backward(grad_output)
             
-                    expected_grads_gpu = {
-                        'dQ': Q.grad.clone(),
-                        'dK': K.grad.clone(),
-                        'dV': V.grad.clone()
-                    }
+                    
                     torch.cuda.synchronize()
+
+                    # Zero gradients and recreate tensors for timed pass
+                    Q_gpu = Q.detach().cuda().requires_grad_(True)
+                    K_gpu = K.detach().cuda().requires_grad_(True)
+                    V_gpu = V.detach().cuda().requires_grad_(True)
+                    Q_gpu.grad = None
+                    K_gpu.grad = None
+                    V_gpu.grad = None
+
+                    # expected_grads_gpu = {
+                    #     'dQ': Q.grad.clone(),
+                    #     'dK': K.grad.clone(),
+                    #     'dV': V.grad.clone()
+                    # }
+
                     torch_start = time.time()
                     expected_out_gpu = self.compute_reference_scaled_dot_product(Q_gpu, K_gpu, V_gpu)
                     grad_output = torch.ones_like(expected_out_gpu)
             
                     expected_out_gpu.backward(grad_output)
             
-                    expected_grads_gpu = {
-                        'dQ': Q.grad.clone(),
-                        'dK': K.grad.clone(),
-                        'dV': V.grad.clone()
-                    }
+                    
                     torch.cuda.synchronize()
                     torch_gpu_time_ms = (time.time() - torch_start) * 1000
+                    expected_grads_gpu = {
+                        'dQ': Q_gpu.grad.clone(),
+                        'dK': K_gpu.grad.clone(),
+                        'dV': V_gpu.grad.clone()
+                    }
                     
                     all_grads_gpu = np.concatenate([expected_grads_gpu['dQ'].cpu().numpy().flatten(), 
                                                    expected_grads_gpu['dK'].cpu().numpy().flatten(), 
                                                    expected_grads_gpu['dV'].cpu().numpy().flatten()])
+                    all_expected_grads = np.concatenate([expected_grads_1['dQ'].numpy().flatten(), 
+                                                        expected_grads_1['dK'].numpy().flatten(), 
+                                                        expected_grads_1['dV'].numpy().flatten()])
                     gpu_pytorch_metrics = self.compute_metrics(
-                        all_grads_gpu, all_grads_gpu,
+                        all_grads_gpu, all_expected_grads,
                         torch_gpu_time_ms, torch_time_ms,
                         config
                     )
                     gpu_config = dataclasses.replace(config)
                     gpu_config.kernel_type = "PyTorch GPU"
                     gpu_pytorch_results = TestResult(
-                        config=gpu_config, passed=True, max_abs_error=0.0, mean_abs_error=0.0,
+                        config=gpu_config, passed=True, max_abs_error=gpu_pytorch_metrics['max_abs_error'], mean_abs_error=gpu_pytorch_metrics['mean_abs_error'],
                         mse=0.0, max_rel_error=0.0, kernel_time_ms=torch_gpu_time_ms, torch_time_ms=torch_time_ms,
                         speedup=gpu_pytorch_metrics['speedup'], tflops=gpu_pytorch_metrics['tflops'], bandwidth_gbps=gpu_pytorch_metrics['bandwidth_gbps'], test_type="backward"
                     )

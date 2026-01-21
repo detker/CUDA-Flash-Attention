@@ -4,7 +4,6 @@
 #define FLT_MAX 3.402823466e+38F
 #include <cuda_fp16.h>
 #endif
-#define HALF_MAX 65504.0f 
 
 template<int BM, int BN, int HEAD_DIM>
 struct shm_t{
@@ -18,7 +17,7 @@ struct shm_t{
 };
 
 template<int BLOCK_SIZE_R, int BLOCK_SIZE_C, int HEAD_DIM, int BK, int TM, int TN>
-__global__ void flash_attention2_forward_kernel_f16(
+__global__ void flash_attention2_forward_kernel_fp16(
     const float* __restrict__ query,
     const float* __restrict__ key,
     const float* __restrict__ value,
@@ -358,7 +357,7 @@ __global__ void flash_attention2_forward_kernel_f16(
 
 #ifndef CUPY_INLINE_COMPILE
 template<int head_dim>
-void host_flash_attention2_forward_f16(
+void host_flash_attention2_forward_fp16(
     const float* h_Q,
     const float* h_K,
     const float* h_V,
@@ -413,7 +412,7 @@ void host_flash_attention2_forward_f16(
     printf("Total blocks: %zu\n", total_blocks);
     
     tm->Start();
-    flash_attention2_forward_kernel_f16<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM, BK, TM, TN>
+    flash_attention2_forward_kernel_fp16<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM, BK, TM, TN>
                                   <<<total_blocks, num_threads_per_block, shared_mem_size>>>(
                                     d_Q, d_K, d_V, d_O, d_logsumexp,
                                     batch_size, num_heads, seq_len
@@ -434,9 +433,9 @@ void host_flash_attention2_forward_f16(
 }
 
 using FA2F16Func = void(const float*, const float*, const float*, float*, float*, int, int, int, TimerManager*);
-template FA2F16Func host_flash_attention2_forward_f16<32>;
-template FA2F16Func host_flash_attention2_forward_f16<64>;
-template FA2F16Func host_flash_attention2_forward_f16<128>;
+template FA2F16Func host_flash_attention2_forward_fp16<32>;
+template FA2F16Func host_flash_attention2_forward_fp16<64>;
+template FA2F16Func host_flash_attention2_forward_fp16<128>;
 #else
 extern "C" __global__
 void flash_attention2_forward_kernel_wrapper_f16(
@@ -450,7 +449,7 @@ void flash_attention2_forward_kernel_wrapper_f16(
     const int seq_len,
     const int head_dim
 ) {
-    flash_attention2_forward_kernel_f16<64, 32, 64, 4, 4, 4>(
+    flash_attention2_forward_kernel_fp16<64, 32, 64, 4, 4, 4>(
         query, key, value, output, logsumexp,
         batch_size, num_heads, seq_len
     );
