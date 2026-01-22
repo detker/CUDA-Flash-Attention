@@ -55,36 +55,29 @@ class TestResult:
 
 
 class FlashAttention2Tester:
-    def __init__(self, stop_on_failure=True, tolerance=1e-3, test_mode='forward',
-                 save_results=False, output_dir='./experiment_results', use_gpu_reference=True,
-                 use_fp16=False):
+    def __init__(self, stop_on_failure=True, tolerance=1e-3, test_mode='forward', 
+                 save_results=False, output_dir='./experiment_results', use_gpu_reference=True):
         self.stop_on_failure = stop_on_failure
         self.tolerance = tolerance
         self.test_mode = test_mode
         self.save_results = save_results
         self.output_dir = Path(output_dir)
         self.use_gpu_reference = use_gpu_reference
-        self.use_fp16 = use_fp16
         self.results: List[TestResult] = []
-
+        
         if self.save_results:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             print(f"Results will be saved to: {self.output_dir}")
-
+        
         if not HAS_CUPY:
             raise RuntimeError("CuPy is required for inline CUDA compilation")
-
-        # Load FP32 or FP16 kernels based on flag
-        if self.use_fp16:
-            self.forward_fa2_kernel_code = self._load_kernel_code('kernel_fa2_optimized_f16.cu')
-            self.backward_fa2_kernel_code = self._load_kernel_code('f-attn2-backward_f16.cu')
-        else:
-            self.forward_fa2_kernel_code = self._load_kernel_code('kernel_fa2_optimized.cu')
-            self.backward_fa2_kernel_code = self._load_kernel_code('f-attn2-backward.cu')
+        
+        self.forward_fa2_kernel_code = self._load_kernel_code('kernel_fa2_optimized.cu')
+        self.backward_fa2_kernel_code = self._load_kernel_code('f-attn2-backward.cu')
         self.forward_fa1_kernel_code = self._load_kernel_code('f-attn.cu')
         self.forward_naive_kernel_code = self._load_kernel_code('vanilla-attn.cu')
         self.forward_fa2_naive = self._load_kernel_code('plain-attn.cu')
-
+        
         self.forward_fa2_kernel_module = None
         self.backward_fa2_kernel_module = None
         self.forward_fa1_kernel_module = None
@@ -272,7 +265,7 @@ class FlashAttention2Tester:
         # kernel configuration
         BLOCK_SIZE_R = 32
         BLOCK_SIZE_C = 32
-        HEAD_DIM = 64
+        HEAD_DIM = head_dim
         TM = 4
         TN = 4
         BK = 4
@@ -337,7 +330,7 @@ class FlashAttention2Tester:
         # kernel configuration for FA1
         BLOCK_SIZE_R = 32
         BLOCK_SIZE_C = 32
-        HEAD_DIM = 64
+        HEAD_DIM = head_dim
         
         total_blocks = batch_size * num_heads
         num_threads = 256
@@ -391,7 +384,7 @@ class FlashAttention2Tester:
         
         BLOCK_SIZE_R = 32
         BLOCK_SIZE_C = 32
-        HEAD_DIM = 64
+        HEAD_DIM = head_dim
         
         T_r = (seq_len + BLOCK_SIZE_R - 1) // BLOCK_SIZE_R
         total_blocks = batch_size * num_heads * T_r
@@ -448,7 +441,7 @@ class FlashAttention2Tester:
         output_cp = cp.zeros_like(Q_cp)
         
         # kernel configuration for naive
-        HEAD_DIM = 64
+        HEAD_DIM = head_dim
         total_blocks = batch_size * num_heads
         num_threads = 128
         
@@ -505,7 +498,7 @@ class FlashAttention2Tester:
         # first, compute D (element-wise sum of output * grad_output)
         BLOCK_SIZE_R = 32
         BLOCK_SIZE_C = 32
-        HEAD_DIM = 64
+        HEAD_DIM = head_dim
         
         # compute D using reduction kernel
         threads_per_block_d = 64 # next_power_of_2(head_dim)
@@ -1007,10 +1000,10 @@ class FlashAttention2Tester:
                 elif config.kernel_type == "fa1":
                     print("  Running CUDA FA1 kernel...")
                     actual, kernel_time_ms = self.run_cuda_fa1_kernel(Q, K, V)
-                elif config.kernel_type == "naive":
-                    print("  Running CUDA Naive FA2 kernel...")
+                elif config.kernel_type == "fa2-naive":
+                    print("  Running CUDA FA2-Naive kernel...")
                     actual, kernel_time_ms = self.run_naive_fa2_kernel(Q, K, V)
-                elif config.kernel_type == "naive-attn":
+                elif config.kernel_type == "vanilla-attn":
                     print("  Running CUDA Naive Attention kernel...")
                     actual, kernel_time_ms = self.run_cuda_naive_kernel(Q, K, V)
                 else:
@@ -1074,10 +1067,10 @@ class FlashAttention2Tester:
                 self._fa2_compile_forward_kernel()
             if 'fa1' in kernel_types:
                 self._fa1_compile_forward_kernel()
-            if 'naive' in kernel_types:
-                self._naive_compile_forward_kernel()
-            if 'naive-attn' in kernel_types:
+            if 'fa2-naive' in kernel_types:
                 self._naive_fa2_compile_forward_kernel()
+            if 'vanilla-attn' in kernel_types:
+                self._naive_compile_forward_kernel()
         # Need backward kernels for: backward mode, any backward test, or any 'both' test
         if self.test_mode in ['backward', 'both'] or any(c.test_backward or c.test_both for c in configs):
             self._fa2_compile_backward_kernel()
@@ -1423,15 +1416,15 @@ def create_experiment_configs(mode) -> List[TestConfig]:
     configs = []
     
     if mode == 'forward':
-        kernel_types = ["naive", "naive-attn", "fa2"]
+        kernel_types = ["fa2-naive", "vanilla-attn", "fa2"]
     elif mode == 'backward':
         kernel_types = ["fa2"]
     else:  # both
         kernel_types = ["fa2"]
-    
+
     for kernel_type in kernel_types:
         configs.extend(create_test_configs(test_mode=mode, kernel_type=kernel_type))
-    
+
     return configs
 
 
@@ -1443,12 +1436,12 @@ def create_sequence_length_experiment_configs(mode) -> List[TestConfig]:
     seq_lengths = [128, 256, 512, 1024, 2048, 4096]
     
     if mode == 'forward':
-        kernel_types = ["naive", "naive-attn", "fa2"]
+        kernel_types = ["fa2-naive", "vanilla-attn", "fa2"]
     elif mode == 'backward':
         kernel_types = ["fa2"]
     else:  # both
         kernel_types = ["fa2"]
-    
+
     for seq_len in seq_lengths:
         for kernel_type in kernel_types:
             config = TestConfig(
@@ -1478,7 +1471,7 @@ def main():
                        help='Test mode: forward, backward, or both passes (default: forward)',
                        required=True)
     parser.add_argument('--kernel', type=str, default='fa2',
-                       choices=['fa2', 'fa1', 'naive-attn', 'naive'],
+                       choices=['fa2', 'fa1', 'vanilla-attn', 'fa2-naive'],
                        help='Kernel type to test (default: fa2)')
     parser.add_argument('--experiment', action='store_true',
                        help='Run comprehensive experiment comparing all implementations on all test configs')
@@ -1496,7 +1489,11 @@ def main():
                        help='Disable GPU reference computations (only use CPU reference)')
     
     args = parser.parse_args()
-    
+
+    # Validate kernel choice for backward/both modes
+    if args.mode in ['backward', 'both'] and args.kernel != 'fa2':
+        parser.error(f"Only 'fa2' kernel supports backward pass. Got --kernel={args.kernel} with --mode={args.mode}")
+
     print(f"\n{'='*80}")
     print(f"Flash Attention Testing Framework")
     print("CUDA Cores Only Implementation (No Tensor Cores)")

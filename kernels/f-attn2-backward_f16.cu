@@ -416,9 +416,9 @@ void host_flash_attention2_backward_fp16(
     cudaMemset(d_deriv_K, 0, qkv_size * sizeof(float));
     cudaMemset(d_deriv_V, 0, qkv_size * sizeof(float));
 
-    const int HEAD_DIM = 64;
+    const int HEAD_DIM = head_dim;
     const int BLOCK_SIZE_C = 32;
-    const int BLOCK_SIZE_R = 64;
+    const int BLOCK_SIZE_R = 32;
 
     printf("Computing D_i for backward pass...\n");
     const size_t threads_per_block_di = next_power_of_2(head_dim);
@@ -475,7 +475,6 @@ void host_flash_attention2_backward_fp16(
 using FA2F32BCKWRDFunc = void(const float*, const float*, const float*, const float*, const float*, const float*, float*, float*, float*, int, int, int, TimerManager*);
 template FA2F32BCKWRDFunc host_flash_attention2_backward_fp16<32>;
 template FA2F32BCKWRDFunc host_flash_attention2_backward_fp16<64>;
-template FA2F32BCKWRDFunc host_flash_attention2_backward_fp16<128>;
 #else
 // wrapper for instantiating the kernel using cupy
 extern "C" __global__

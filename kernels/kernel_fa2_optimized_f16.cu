@@ -393,9 +393,9 @@ void host_flash_attention2_forward_fp16(
     printf("Batch: %d, Heads: %d, SeqLen: %d, HeadDim: %d\n", 
            batch_size, num_heads, seq_len, head_dim);
     
-    const int HEAD_DIM = 64;
+    const int HEAD_DIM = head_dim;
     const int BLOCK_SIZE_C = 32;
-    const int BLOCK_SIZE_R = 64;
+    const int BLOCK_SIZE_R = 32;
     const int BK = 4;             // tile size for head_dim dimension
     const int TM = 4;             // each thread handles TM rows
     const int TN = 4;             // each thread handles TN cols
@@ -435,10 +435,9 @@ void host_flash_attention2_forward_fp16(
 using FA2F16Func = void(const float*, const float*, const float*, float*, float*, int, int, int, TimerManager*);
 template FA2F16Func host_flash_attention2_forward_fp16<32>;
 template FA2F16Func host_flash_attention2_forward_fp16<64>;
-template FA2F16Func host_flash_attention2_forward_fp16<128>;
 #else
 extern "C" __global__
-void flash_attention2_forward_kernel_wrapper_f16(
+void flash_attention2_forward_kernel_wrapper(
     const float* query,
     const float* key,
     const float* value,
@@ -449,7 +448,7 @@ void flash_attention2_forward_kernel_wrapper_f16(
     const int seq_len,
     const int head_dim
 ) {
-    flash_attention2_forward_kernel_fp16<64, 32, 64, 4, 4, 4>(
+    flash_attention2_forward_kernel_fp16<32, 32, 64, 4, 4, 4>(
         query, key, value, output, logsumexp,
         batch_size, num_heads, seq_len
     );

@@ -379,7 +379,7 @@ void host_flash_attention2_forward(
     printf("Batch: %d, Heads: %d, SeqLen: %d, HeadDim: %d\n", 
            batch_size, num_heads, seq_len, head_dim);
     
-    const int HEAD_DIM = 64;
+    const int HEAD_DIM = head_dim;
     const int BLOCK_SIZE_C = 32;
     const int BLOCK_SIZE_R = 32;
     const int BK = 4;             // tile size for head_dim dimension
@@ -420,7 +420,6 @@ void host_flash_attention2_forward(
 using FA2F32Func = void(const float*, const float*, const float*, float*, float*, int, int, int, TimerManager*);
 template FA2F32Func host_flash_attention2_forward<32>;
 template FA2F32Func host_flash_attention2_forward<64>;
-template FA2F32Func host_flash_attention2_forward<128>;
 #else
 extern "C" __global__
 void flash_attention2_forward_kernel_wrapper(

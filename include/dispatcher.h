@@ -215,7 +215,7 @@ inline void RunFlashAttention(
     ComputeDataType compute_data_type, ComputeType compute_method, ModeType mode, TimerManager* tm) 
 {
     static constexpr int MIN_HEAD_DIM = 32;
-    static constexpr int MAX_HEAD_DIM = 128;
+    static constexpr int MAX_HEAD_DIM = 64;
 
     if (mode == ModeType::Forward)
     {
