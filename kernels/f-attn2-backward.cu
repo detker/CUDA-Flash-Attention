@@ -101,8 +101,10 @@ __global__ void flash_attention2_backward_kernel(
             // v_buff_f4[x] = __ldg(reinterpret_cast<const float4 *>(&value[idx]));
         } else {
             k_buff_f4[x] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-
-            v_buff_f4[x] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            v_buff[(local_col + 0) * BLOCK_SIZE_C + local_row] = 0.0f;
+            v_buff[(local_col + 1) * BLOCK_SIZE_C + local_row] = 0.0f;
+            v_buff[(local_col + 2) * BLOCK_SIZE_C + local_row] = 0.0f;
+            v_buff[(local_col + 3) * BLOCK_SIZE_C + local_row] = 0.0f;
         }
 
         // also initialize the derivative buffers to zero
@@ -137,9 +139,13 @@ __global__ void flash_attention2_backward_kernel(
                 q_buff_f4[x] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             }
             if (local_col == 0) {
-                logsumexp_d_shm[local_row] = logsumexp[BATCH_IDX * num_heads * seq_len + 
-                                                        HEAD_IDX * seq_len + 
-                                                        global_seq_idx];
+                if (global_seq_idx < seq_len) {
+                    logsumexp_d_shm[local_row] = logsumexp[BATCH_IDX * num_heads * seq_len +
+                                                            HEAD_IDX * seq_len +
+                                                            global_seq_idx];
+                } else {
+                    logsumexp_d_shm[local_row] = 0.0f;  // Safe default for padding
+                }
             }
         }
         __syncthreads();
@@ -198,9 +204,13 @@ __global__ void flash_attention2_backward_kernel(
             }
 
             if (local_col == 0) {
-                logsumexp_d_shm[local_row] = d[BATCH_IDX * num_heads * seq_len + 
-                                                        HEAD_IDX * seq_len + 
-                                                        global_seq_idx];
+                if (global_seq_idx < seq_len) {
+                    logsumexp_d_shm[local_row] = d[BATCH_IDX * num_heads * seq_len +
+                                                            HEAD_IDX * seq_len +
+                                                            global_seq_idx];
+                } else {
+                    logsumexp_d_shm[local_row] = 0.0f;  // Safe default for padding
+                }
             }
         }
         __syncthreads();

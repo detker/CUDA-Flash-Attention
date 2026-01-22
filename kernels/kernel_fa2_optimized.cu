@@ -331,7 +331,7 @@ __global__ void flash_attention2_forward_kernel(
             int idx = base_hbm_offset + local_row * HEAD_DIM + local_col;
             output[idx] = o_buff[local_row * HEAD_DIM + local_col] / logsumexp_shm[local_row];
 
-            if(local_col == 0)
+            if(local_col == 0 && global_seq_idx < seq_len)
             {
                 logsumexp[BATCH_IDX * num_heads * seq_len + 
                                HEAD_IDX * seq_len + 

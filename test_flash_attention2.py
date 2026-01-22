@@ -55,29 +55,36 @@ class TestResult:
 
 
 class FlashAttention2Tester:
-    def __init__(self, stop_on_failure=True, tolerance=1e-3, test_mode='forward', 
-                 save_results=False, output_dir='./experiment_results', use_gpu_reference=True):
+    def __init__(self, stop_on_failure=True, tolerance=1e-3, test_mode='forward',
+                 save_results=False, output_dir='./experiment_results', use_gpu_reference=True,
+                 use_fp16=False):
         self.stop_on_failure = stop_on_failure
         self.tolerance = tolerance
         self.test_mode = test_mode
         self.save_results = save_results
         self.output_dir = Path(output_dir)
         self.use_gpu_reference = use_gpu_reference
+        self.use_fp16 = use_fp16
         self.results: List[TestResult] = []
-        
+
         if self.save_results:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             print(f"Results will be saved to: {self.output_dir}")
-        
+
         if not HAS_CUPY:
             raise RuntimeError("CuPy is required for inline CUDA compilation")
-        
-        self.forward_fa2_kernel_code = self._load_kernel_code('kernel_fa2_optimized.cu')
-        self.backward_fa2_kernel_code = self._load_kernel_code('f-attn2-backward.cu')
+
+        # Load FP32 or FP16 kernels based on flag
+        if self.use_fp16:
+            self.forward_fa2_kernel_code = self._load_kernel_code('kernel_fa2_optimized_f16.cu')
+            self.backward_fa2_kernel_code = self._load_kernel_code('f-attn2-backward_f16.cu')
+        else:
+            self.forward_fa2_kernel_code = self._load_kernel_code('kernel_fa2_optimized.cu')
+            self.backward_fa2_kernel_code = self._load_kernel_code('f-attn2-backward.cu')
         self.forward_fa1_kernel_code = self._load_kernel_code('f-attn.cu')
         self.forward_naive_kernel_code = self._load_kernel_code('vanilla-attn.cu')
         self.forward_fa2_naive = self._load_kernel_code('plain-attn.cu')
-        
+
         self.forward_fa2_kernel_module = None
         self.backward_fa2_kernel_module = None
         self.forward_fa1_kernel_module = None
