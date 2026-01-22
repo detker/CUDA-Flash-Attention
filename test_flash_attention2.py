@@ -308,9 +308,10 @@ class FlashAttention2Tester:
         elapsed_ms = cp.cuda.get_elapsed_time(start, end) / num_runs
         
         output_np = cp.asnumpy(output_cp)
-        
-        return output_np, elapsed_ms
-    
+        logsumexp_np = cp.asnumpy(logsumexp_cp)
+
+        return output_np, logsumexp_np, elapsed_ms
+
     def run_cuda_fa1_kernel(self, Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor) -> Tuple[np.ndarray, float]:
         """Run FA1 kernel"""
         config = Q.shape
@@ -603,7 +604,195 @@ class FlashAttention2Tester:
             'bandwidth_gbps': bandwidth_gbps,
             'speedup': speedup
         }
-    
+
+    def _run_test_both(self, config: TestConfig) -> Tuple[TestResult, TestResult, TestResult]:
+        """Run forward kernel, then use its output to run backward kernel"""
+        print(f"\nRunning test: {config.name} (forward + backward pass)")
+        print(f"Config: B={config.batch_size}, H={config.num_heads}, "
+              f"S={config.seq_len}, D={config.head_dim}")
+
+        try:
+            Q, K, V = self.generate_test_data(config)
+
+            print("  Computing PyTorch CPU reference (forward)...")
+            torch_fwd_start = time.time()
+            expected_output = self.compute_reference(Q, K, V)
+            torch_fwd_time_ms = (time.time() - torch_fwd_start) * 1000
+
+            Q_ref = Q.detach().clone().requires_grad_(True)
+            K_ref = K.detach().clone().requires_grad_(True)
+            V_ref = V.detach().clone().requires_grad_(True)
+
+            print("  Computing PyTorch CPU reference (backward)...")
+            expected_output_ref = self.compute_reference(Q_ref, K_ref, V_ref)
+            torch_bwd_start = time.time()
+            expected_grads = self.compute_reference_backward(expected_output_ref, Q_ref, K_ref, V_ref)
+            torch_bwd_time_ms = (time.time() - torch_bwd_start) * 1000
+            torch_total_time_ms = torch_fwd_time_ms + torch_bwd_time_ms
+
+            fwd_flops = 2 * config.batch_size * config.num_heads * config.seq_len * config.seq_len * config.head_dim * 2
+            bwd_flops = fwd_flops * 2.5  # backward is roughly 2.5x forward
+            total_flops = fwd_flops + bwd_flops
+            bytes_transferred = (config.batch_size * config.num_heads *
+                               config.seq_len * config.head_dim * 4 * 4)  # 4 tensors, 4 bytes/float
+
+            cpu_tflops = (total_flops / (torch_total_time_ms * 1e-3)) / 1e12
+            cpu_bandwidth = (bytes_transferred / (torch_total_time_ms * 1e-3)) / 1e9
+            cpu_config = dataclasses.replace(config)
+            cpu_config.kernel_type = "PyTorch CPU"
+            cpu_pytorch_result = TestResult(
+                config=cpu_config, passed=True, max_abs_error=0.0, mean_abs_error=0.0,
+                mse=0.0, max_rel_error=0.0, kernel_time_ms=torch_total_time_ms,
+                torch_time_ms=torch_total_time_ms, speedup=1.0, tflops=cpu_tflops,
+                bandwidth_gbps=cpu_bandwidth, test_type="both"
+            )
+
+            gpu_pytorch_result = None
+            if self.use_gpu_reference:
+                print("  Computing PyTorch GPU reference...")
+                Q_gpu = Q.cuda().requires_grad_(True)
+                K_gpu = K.cuda().requires_grad_(True)
+                V_gpu = V.cuda().requires_grad_(True)
+
+                # Warmup
+                out_warmup = self.compute_reference_scaled_dot_product(Q_gpu, K_gpu, V_gpu)
+                grad_warmup = torch.ones_like(out_warmup)
+                out_warmup.backward(grad_warmup)
+                torch.cuda.synchronize()
+
+                # Timed run
+                Q_gpu = Q.detach().cuda().requires_grad_(True)
+                K_gpu = K.detach().cuda().requires_grad_(True)
+                V_gpu = V.detach().cuda().requires_grad_(True)
+
+                torch_gpu_start = time.time()
+                out_gpu = self.compute_reference_scaled_dot_product(Q_gpu, K_gpu, V_gpu)
+                grad_output_gpu = torch.ones_like(out_gpu)
+                out_gpu.backward(grad_output_gpu)
+                torch.cuda.synchronize()
+                torch_gpu_time_ms = (time.time() - torch_gpu_start) * 1000
+
+                # Compute GPU vs CPU error for output
+                gpu_out_np = out_gpu.detach().cpu().numpy()
+                gpu_fwd_abs_err = np.abs(gpu_out_np - expected_output.detach().numpy())
+                gpu_fwd_max_err = np.max(gpu_fwd_abs_err)
+                gpu_fwd_mean_err = np.mean(gpu_fwd_abs_err)
+
+                # Compute GPU vs CPU error for gradients
+                gpu_grads = {
+                    'dQ': Q_gpu.grad.cpu().numpy(),
+                    'dK': K_gpu.grad.cpu().numpy(),
+                    'dV': V_gpu.grad.cpu().numpy()
+                }
+                all_gpu_grads = np.concatenate([gpu_grads['dQ'].flatten(), gpu_grads['dK'].flatten(), gpu_grads['dV'].flatten()])
+                all_cpu_grads = np.concatenate([expected_grads['dQ'].numpy().flatten(), expected_grads['dK'].numpy().flatten(), expected_grads['dV'].numpy().flatten()])
+                gpu_bwd_abs_err = np.abs(all_gpu_grads - all_cpu_grads)
+                gpu_bwd_max_err = np.max(gpu_bwd_abs_err)
+                gpu_bwd_mean_err = np.mean(gpu_bwd_abs_err)
+
+                gpu_max_err = max(gpu_fwd_max_err, gpu_bwd_max_err)
+                gpu_mean_err = (gpu_fwd_mean_err + gpu_bwd_mean_err) / 2
+
+                gpu_tflops = (total_flops / (torch_gpu_time_ms * 1e-3)) / 1e12
+                gpu_bandwidth = (bytes_transferred / (torch_gpu_time_ms * 1e-3)) / 1e9
+
+                gpu_config = dataclasses.replace(config)
+                gpu_config.kernel_type = "PyTorch GPU"
+                gpu_pytorch_result = TestResult(
+                    config=gpu_config, passed=True, max_abs_error=gpu_max_err, mean_abs_error=gpu_mean_err,
+                    mse=0.0, max_rel_error=0.0, kernel_time_ms=torch_gpu_time_ms,
+                    torch_time_ms=torch_total_time_ms, speedup=torch_total_time_ms/torch_gpu_time_ms,
+                    tflops=gpu_tflops, bandwidth_gbps=gpu_bandwidth, test_type="both"
+                )
+
+            print("  Running CUDA FA2 forward kernel...")
+            actual_output, logsumexp_np, fwd_kernel_time_ms = self.run_fa2_forward_kernel(Q, K, V)
+
+            # Compute forward metrics
+            fwd_metrics = self.compute_metrics(
+                actual_output, expected_output.detach().numpy(),
+                fwd_kernel_time_ms, torch_fwd_time_ms,
+                config
+            )
+
+            fwd_passed = (fwd_metrics['max_abs_error'] < self.tolerance and
+                         not np.isnan(actual_output).any() and
+                         not np.isinf(actual_output).any())
+
+            print("  Running CUDA FA2 backward kernel (using forward output)...")
+            grad_output = torch.ones_like(expected_output)
+            actual_output_torch = torch.from_numpy(actual_output)
+
+            actual_grads, bwd_kernel_time_ms = self.run_cuda_fa2_backward_kernel(
+                Q, K, V, actual_output_torch, grad_output, logsumexp_np
+            )
+
+            # Compute backward metrics
+            all_actual_grads = np.concatenate([
+                actual_grads['dQ'].flatten(),
+                actual_grads['dK'].flatten(),
+                actual_grads['dV'].flatten()
+            ])
+            all_expected_grads = np.concatenate([
+                expected_grads['dQ'].numpy().flatten(),
+                expected_grads['dK'].numpy().flatten(),
+                expected_grads['dV'].numpy().flatten()
+            ])
+
+            bwd_metrics = self.compute_metrics(
+                all_actual_grads, all_expected_grads,
+                bwd_kernel_time_ms, torch_bwd_time_ms,
+                config
+            )
+
+            bwd_passed = (bwd_metrics['max_abs_error'] < self.tolerance and
+                         not any(np.isnan(actual_grads[n]).any() for n in ['dQ', 'dK', 'dV']) and
+                         not any(np.isinf(actual_grads[n]).any() for n in ['dQ', 'dK', 'dV']))
+
+            total_kernel_time_ms = fwd_kernel_time_ms + bwd_kernel_time_ms
+            overall_passed = fwd_passed and bwd_passed
+            max_error = max(fwd_metrics['max_abs_error'], bwd_metrics['max_abs_error'])
+            mean_error = (fwd_metrics['mean_abs_error'] + bwd_metrics['mean_abs_error']) / 2
+
+            combined_tflops = (total_flops / (total_kernel_time_ms * 1e-3)) / 1e12
+            combined_speedup = torch_total_time_ms / total_kernel_time_ms if total_kernel_time_ms > 0 else 0.0
+
+            result = TestResult(
+                config=config,
+                passed=overall_passed,
+                max_abs_error=max_error,
+                mean_abs_error=mean_error,
+                mse=(fwd_metrics['mse'] + bwd_metrics['mse']) / 2,
+                max_rel_error=max(fwd_metrics['max_rel_error'], bwd_metrics['max_rel_error']),
+                kernel_time_ms=total_kernel_time_ms,
+                torch_time_ms=torch_total_time_ms,
+                speedup=combined_speedup,
+                tflops=combined_tflops,
+                bandwidth_gbps=(fwd_metrics['bandwidth_gbps'] + bwd_metrics['bandwidth_gbps']),
+                test_type="both",
+                gradient_names=['dQ', 'dK', 'dV']
+            )
+
+            if overall_passed:
+                print(f"  PASSED (fwd_err={fwd_metrics['max_abs_error']:.2e}, bwd_err={bwd_metrics['max_abs_error']:.2e})")
+                print(f"  Timing: fwd={fwd_kernel_time_ms:.3f}ms, bwd={bwd_kernel_time_ms:.3f}ms, total={total_kernel_time_ms:.3f}ms")
+            else:
+                error_msg = ""
+                if not fwd_passed:
+                    error_msg += f"Forward failed (err={fwd_metrics['max_abs_error']:.2e}). "
+                if not bwd_passed:
+                    error_msg += f"Backward failed (err={bwd_metrics['max_abs_error']:.2e}). "
+                result.error_message = error_msg
+                print(f"  FAILED: {error_msg}")
+
+            return result, cpu_pytorch_result, gpu_pytorch_result
+
+        except Exception as e:
+            print(f"ERROR: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise
+
     def run_test(self, config: TestConfig) -> TestResult:
         """Run a single test case"""
         # handle test_both mode by running both passes and summing metrics
@@ -807,7 +996,7 @@ class FlashAttention2Tester:
 
                 if config.kernel_type == "fa2":
                     print("  Running CUDA FA2 kernel...")
-                    actual, kernel_time_ms = self.run_fa2_forward_kernel(Q, K, V)
+                    actual, _, kernel_time_ms = self.run_fa2_forward_kernel(Q, K, V)
                 elif config.kernel_type == "fa1":
                     print("  Running CUDA FA1 kernel...")
                     actual, kernel_time_ms = self.run_cuda_fa1_kernel(Q, K, V)
