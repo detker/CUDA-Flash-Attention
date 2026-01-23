@@ -34,7 +34,7 @@ struct FlashAttentionDispatcher
                 exit(EXIT_FAILURE);
             }
             printf("Running Flash Attention 1 Forward (HEAD_DIM=%d)...\n", HEAD_DIM);
-            host_flash_attention_forward(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, HEAD_DIM, tm);
+            host_flash_attention_forward<HEAD_DIM>(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, tm);
         }
         else if (compute_method == ComputeType::Naive)
         {
@@ -43,7 +43,7 @@ struct FlashAttentionDispatcher
                 exit(EXIT_FAILURE);
             }
             printf("Running Vanilla Attention Forward (HEAD_DIM=%d)...\n", HEAD_DIM);
-            host_vanilla_attention_forward(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, HEAD_DIM, tm);
+            host_vanilla_attention_forward<HEAD_DIM>(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, tm);
         }
         else
         {

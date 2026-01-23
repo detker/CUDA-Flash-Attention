@@ -230,6 +230,7 @@ __global__ void flash_attention_forward_kernel(
 }
 
 #ifndef CUPY_INLINE_COMPILE
+template<int head_dim>
 void host_flash_attention_forward(
     const float* h_Q,
     const float* h_K,
@@ -239,7 +240,6 @@ void host_flash_attention_forward(
     int batch_size,
     int seq_len,
     int num_heads,
-    int head_dim,
     TimerManager* tm
 ) {
     int device;
@@ -283,7 +283,7 @@ void host_flash_attention_forward(
     // const int block_size_c = (M + sizeof(float)*head_dim - 1) / (sizeof(float) * head_dim);
     // const int block_size_r = std::min(block_size_c, head_dim);
     const size_t num_threads_per_block = 128;
-    const int HEAD_DIM = 64;
+    const int HEAD_DIM = head_dim;
     const int BLOCK_SIZE_C = 32;
     const int BLOCK_SIZE_R = 32;
     const int shared_mem_size = sizeof(shm_t<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>);
@@ -307,6 +307,9 @@ void host_flash_attention_forward(
     CUDA_CHECK(cudaFree(d_logsumexp));
     CUDA_CHECK(cudaFree(d_maxes));
 }
+using FA1ForwardFunc = void(const float*, const float*, const float*, float*, float*, int, int, int, TimerManager*);
+template FA1ForwardFunc host_flash_attention_forward<32>;
+template FA1ForwardFunc host_flash_attention_forward<64>;
 #else
 extern "C" __global__
 void flash_attention_forward_kernel_wrapper(

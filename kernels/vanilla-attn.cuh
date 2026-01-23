@@ -3,6 +3,7 @@
 #include <float.h>
 #include <cuda_runtime.h>
 
+template<int head_dim>
 void host_vanilla_attention_forward(
     const float* h_Q,
     const float* h_K,
@@ -12,6 +13,5 @@ void host_vanilla_attention_forward(
     int batch_size,
     int seq_len,
     int num_heads,
-    int head_dim,
     TimerManager* tm = nullptr
 );

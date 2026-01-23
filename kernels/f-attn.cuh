@@ -9,6 +9,7 @@
 #include "error_utils.h"
 #include "timer.h"
 
+template<int head_dim>
 void host_flash_attention_forward(
     const float* query,
     const float* key,
@@ -18,5 +19,4 @@ void host_flash_attention_forward(
     int batch_size,
     int seq_len,
     int num_heads,
-    int head_dim,
     TimerManager* tm);

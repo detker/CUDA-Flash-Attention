@@ -80,6 +80,7 @@ __global__ void vanilla_attention_kernel(
 }
 
 #ifndef CUPY_INLINE_COMPILE
+template<int head_dim>
 void host_vanilla_attention_forward(
     const float* h_Q,
     const float* h_K,
@@ -89,7 +90,6 @@ void host_vanilla_attention_forward(
     int batch_size,
     int seq_len,
     int num_heads,
-    int head_dim,
     TimerManager* tm
 ) {
     size_t qkv_size = batch_size * num_heads * seq_len * head_dim;
@@ -111,6 +111,7 @@ void host_vanilla_attention_forward(
     printf("Batch: %d, Heads: %d, SeqLen: %d, HeadDim: %d\n", 
            batch_size, num_heads, seq_len, head_dim);
     
+    const int HEAD_DIM = head_dim;
     const int BLOCK_SIZE = 128;
     const int total_blocks = batch_size * num_heads;
     
@@ -118,8 +119,8 @@ void host_vanilla_attention_forward(
     printf("Using global memory (HBM) for attention scores\n");
     
     if (tm) tm->Start();
-    
-    vanilla_attention_kernel<BLOCK_SIZE><<<total_blocks, BLOCK_SIZE>>>(
+
+    vanilla_attention_kernel<HEAD_DIM><<<total_blocks, BLOCK_SIZE>>>(
         d_Q, d_K, d_V, d_O, d_attention_scores,
         batch_size, num_heads, seq_len
     );
@@ -137,7 +138,9 @@ void host_vanilla_attention_forward(
     CUDA_CHECK(cudaFree(d_O));
     CUDA_CHECK(cudaFree(d_attention_scores));
 }
-
+using AttnVanillaFunc = void(const float*, const float*, const float*, float*, float*, int, int, int, TimerManager*);
+template AttnVanillaFunc host_vanilla_attention_forward<32>;
+template AttnVanillaFunc host_vanilla_attention_forward<64>;
 #else
 // wrapper for CuPy
 extern "C" __global__
