@@ -77,7 +77,6 @@ __global__ void flash_attention2_backward_kernel_fp16(
                                 HEAD_IDX * (seq_len * HEAD_DIM) + 
                                 KV_TILE_IDX * BLOCK_SIZE_C * HEAD_DIM;
     __half2 *k_buff_h2 = reinterpret_cast<__half2 *>(k_buff);
-    __half2 *v_buff_h2 = reinterpret_cast<__half2 *>(v_buff);
     __half2 *d_k_buff_h2 = reinterpret_cast<__half2 *>(d_k_buff);
     __half2 *d_v_buff_h2 = reinterpret_cast<__half2 *>(d_v_buff);
     // each block handles one k,v tile, so every thread in block handles at least one element of that k,v tile
@@ -436,7 +435,6 @@ void host_flash_attention2_backward_fp16(
     printf("Batch: %d, Heads: %d, SeqLen: %d, HeadDim: %d\n", 
            batch_size, num_heads, seq_len, head_dim);
     
-    const size_t T_r = (seq_len + BLOCK_SIZE_R - 1) / BLOCK_SIZE_R;
     const size_t T_c = (seq_len + BLOCK_SIZE_C - 1) / BLOCK_SIZE_C;
     const size_t total_blocks = batch_size * num_heads * T_c;
     const size_t num_threads_per_block = 256;

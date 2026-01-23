@@ -169,7 +169,6 @@ __global__ void flash_attention2_forward_kernel(
             unsigned int globalRow = threadRow * TM + resIdx_M;
             if (globalRow >= BLOCK_SIZE_R) continue;
             
-            // niepotrzebne i guess
            unsigned int global_q_idx = Q_TILE_IDX * BLOCK_SIZE_R + globalRow;
             if (global_q_idx >= seq_len) continue;
 
@@ -280,7 +279,6 @@ __global__ void flash_attention2_forward_kernel(
         } 
         __syncthreads();
 
-        float threadO[TM * BK] = {0.0f};
         #pragma unroll
         for (unsigned int resIdx_M = 0; resIdx_M < TM; ++resIdx_M) {
             unsigned int row = threadRow * TM + resIdx_M;

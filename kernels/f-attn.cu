@@ -280,7 +280,6 @@ void host_flash_attention_forward(
     printf("Batch: %d, Heads: %d, SeqLen: %d, HeadDim: %d\n", 
            batch_size, num_heads, seq_len, head_dim);
     
-    size_t M = prop.sharedMemPerMultiprocessor; //gtx 1080 has 98304 bytes = 96 KB
     // const int block_size_c = (M + sizeof(float)*head_dim - 1) / (sizeof(float) * head_dim);
     // const int block_size_r = std::min(block_size_c, head_dim);
     const size_t num_threads_per_block = 128;

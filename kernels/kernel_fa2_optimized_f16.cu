@@ -246,13 +246,6 @@ __global__ void flash_attention2_forward_kernel_fp16(
                 row_sum += val;
             }
 
-            // float row_sum = 0.0f;
-            // #pragma unroll
-            // for(int col = LANE_ID; col < BLOCK_SIZE_C; col += 32)
-            // {
-            //     row_sum += s_buff[row * BLOCK_SIZE_C + col];
-            // }
-
             // warp reduction to find sum
             #pragma unroll
             for(int offset = 16; offset > 0; offset >>= 1)
@@ -295,7 +288,6 @@ __global__ void flash_attention2_forward_kernel_fp16(
         } 
         __syncthreads();
 
-        float threadO[TM * BK] = {0.0f};
         #pragma unroll
         for (unsigned int resIdx_M = 0; resIdx_M < TM; ++resIdx_M) {
             unsigned int row = threadRow * TM + resIdx_M;
