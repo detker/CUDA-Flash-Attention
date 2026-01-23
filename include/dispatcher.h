@@ -29,11 +29,19 @@ struct FlashAttentionDispatcher
         }
         else if (compute_method == ComputeType::FlashAttention1)
         {
+            if (compute_data_type == ComputeDataType::FP16) {
+                fprintf(stderr, "Error: Flash Attention 1 FP16 support not implemented\n");
+                exit(EXIT_FAILURE);
+            }
             printf("Running Flash Attention 1 Forward (HEAD_DIM=%d)...\n", HEAD_DIM);
             host_flash_attention_forward(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, HEAD_DIM, tm);
         }
         else if (compute_method == ComputeType::Naive)
         {
+            if (compute_data_type == ComputeDataType::FP16) {
+                fprintf(stderr, "Error: Vanilla Attention FP16 support not implemented\n");
+                exit(EXIT_FAILURE);
+            }
             printf("Running Vanilla Attention Forward (HEAD_DIM=%d)...\n", HEAD_DIM);
             host_vanilla_attention_forward(Q, K, V, O, logsumexp, batch_size, seq_len, num_heads, HEAD_DIM, tm);
         }
