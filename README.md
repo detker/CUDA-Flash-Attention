@@ -499,11 +499,13 @@ Flash Attention 2 solves the memory-bound nature of standard attention mechanism
 
 ## **Limitations:**
 - It's CUDA Cores implementation ONLY
+- Only `head_dim` values of 32 and 64 are supported, as these are the most common dimensions used in transformer architectures and allow for optimized shared memory tiling
 
 ## **Possible Improvements:**
 - BF16 precision support
 - Tensor Core implementation
 - GEMM optimizations 
+- Support for other popular `head_dim` values
 
 
 ## References
