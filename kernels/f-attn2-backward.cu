@@ -15,18 +15,19 @@ __host__ __device__ __forceinline__ unsigned int next_power_of_2(unsigned int x)
     return x;
 }
 
+// shared memory layout for flash attention 2 backward pass
 template<int BLOCK_SIZE_R, int BLOCK_SIZE_C, int HEAD_DIM>
 struct shm_t{
-    float q_buff[BLOCK_SIZE_R*HEAD_DIM]; // for q tile and d_o tile
+    float q_buff[BLOCK_SIZE_R*HEAD_DIM]; // q tile, then reused for d_o tile
     float k_buff[BLOCK_SIZE_C*HEAD_DIM];
-    float v_buff[BLOCK_SIZE_C*HEAD_DIM];
-    
-    float d_k_buff[BLOCK_SIZE_C*HEAD_DIM];
-    float d_v_buff[BLOCK_SIZE_C*HEAD_DIM];
+    float v_buff[BLOCK_SIZE_C*HEAD_DIM]; // V transposed for dP @ V^T
 
-    float logsumexp[BLOCK_SIZE_R]; // for logsumexp_i and d_i
+    float d_k_buff[BLOCK_SIZE_C*HEAD_DIM]; // gradient accumulator for K
+    float d_v_buff[BLOCK_SIZE_C*HEAD_DIM]; // gradient accumulator for V
 
-    float p_buff[BLOCK_SIZE_R*BLOCK_SIZE_C]; // to store P_ij and dP_ij and S_ij
+    float logsumexp[BLOCK_SIZE_R]; // logsumexp_i, then reused for D_i
+
+    float p_buff[BLOCK_SIZE_R*BLOCK_SIZE_C]; // P_ij (recomputed), then dS_ij
 };
 
 template<int BLOCK_SIZE_R, int BLOCK_SIZE_C, int HEAD_DIM>
@@ -78,8 +79,7 @@ __global__ void flash_attention2_backward_kernel(
     float4 *k_buff_f4 = reinterpret_cast<float4 *>(k_buff);
     float4 *d_k_buff_f4 = reinterpret_cast<float4 *>(d_k_buff);
     float4 *d_v_buff_f4 = reinterpret_cast<float4 *>(d_v_buff);
-    // each block handles one k,v tile, so every thread in block handles at least one element of that k,v tile
-    // load kv tile into shm
+    // load K,V tile into shm (V is transposed for later dP @ V^T computation)
     #pragma unroll
     for (int x=tid; x < BLOCK_SIZE_C * HEAD_DIM / 4; x += blockDim.x)
     {
@@ -97,7 +97,6 @@ __global__ void flash_attention2_backward_kernel(
             v_buff[(local_col + 1) * BLOCK_SIZE_C + local_row] = v_val_f4.y;
             v_buff[(local_col + 2) * BLOCK_SIZE_C + local_row] = v_val_f4.z;
             v_buff[(local_col + 3) * BLOCK_SIZE_C + local_row] = v_val_f4.w;
-            // v_buff_f4[x] = __ldg(reinterpret_cast<const float4 *>(&value[idx]));
         } else {
             k_buff_f4[x] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             v_buff[(local_col + 0) * BLOCK_SIZE_C + local_row] = 0.0f;
@@ -119,7 +118,7 @@ __global__ void flash_attention2_backward_kernel(
     // iterate over q tiles
     for (int i = 0; i < T_r; ++i)
     {
-        // Load q, d_o, logsumexp into shm
+        // Load q, logsumexp into shm
         #pragma unroll
         for(int x=tid; x < BLOCK_SIZE_R * HEAD_DIM / 4; x += blockDim.x)
         {
@@ -149,7 +148,7 @@ __global__ void flash_attention2_backward_kernel(
         }
         __syncthreads();
 
-        // compute S_ij, P_ij
+        // recompute S_ij = Q @ K^T / sqrt(d), then P_ij = softmax(S_ij)
         for (int row = warp_start_row; row < warp_end_row; ++row)
         {
             int global_q_idx = i * BLOCK_SIZE_R + row;
@@ -164,7 +163,6 @@ __global__ void flash_attention2_backward_kernel(
                 }
 
                 float dot_product = 0.0f;
-                // #pragma unroll
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; d+=4)
                 {
@@ -177,13 +175,15 @@ __global__ void flash_attention2_backward_kernel(
                     dot_product = __fmaf_rn(q_val_f4.w, k_val_f4.w, dot_product);
 
                 }
-                dot_product /= sqrt_head_dim; // scale
-                dot_product = __expf(dot_product - logsumexp_d_shm[row]); // softmax
+                dot_product /= sqrt_head_dim;
+                // P_ij = exp(S_ij - logsumexp) = softmax(S_ij)
+                dot_product = __expf(dot_product - logsumexp_d_shm[row]);
                 p_buff[row * BLOCK_SIZE_C + col] = dot_product;
             }
         }
         __syncthreads();
 
+        // load dO tile into shm (reuse q_buff) and D_i into shm (reuse logsumexp_d_shm)
         #pragma unroll
         for(int x=tid; x < BLOCK_SIZE_R * HEAD_DIM / 4; x += blockDim.x)
         {
@@ -202,19 +202,20 @@ __global__ void flash_attention2_backward_kernel(
                 q_buff_f4[x] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             }
 
+            // load D_i = rowsum(dO * O) for dS computation
             if (local_col == 0) {
                 if (global_seq_idx < seq_len) {
                     logsumexp_d_shm[local_row] = d[BATCH_IDX * num_heads * seq_len +
                                                             HEAD_IDX * seq_len +
                                                             global_seq_idx];
                 } else {
-                    logsumexp_d_shm[local_row] = 0.0f;  // Safe default for padding
+                    logsumexp_d_shm[local_row] = 0.0f;
                 }
             }
         }
         __syncthreads();
 
-        // compute dV_j
+        // dV_j = sum_i(P_ij^T @ dO_i)
         #pragma unroll
         for(int x=tid; x < BLOCK_SIZE_C * HEAD_DIM; x += blockDim.x)
         {
@@ -238,6 +239,7 @@ __global__ void flash_attention2_backward_kernel(
         }
         __syncthreads();
 
+        // dS_ij = P_ij * (dP_ij - D_i) / sqrt(d), where dP_ij = dO @ V^T
         for (int row = warp_start_row; row < warp_end_row; ++row)
         {
             int global_q_idx = i * BLOCK_SIZE_R + row;
@@ -251,25 +253,26 @@ __global__ void flash_attention2_backward_kernel(
                     continue;
                 }
 
+                // dP_ij = dO @ V^T
                 float d_p_ij = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d)
                 {
-                    d_p_ij += d_o_buff[row * HEAD_DIM + d] * v_buff[d * BLOCK_SIZE_C + col]; 
+                    d_p_ij += d_o_buff[row * HEAD_DIM + d] * v_buff[d * BLOCK_SIZE_C + col];
                 }
+                // dS_ij = P_ij * (dP_ij - D_i) / sqrt(d)
                 p_buff[row * BLOCK_SIZE_C + col] = (d_p_ij - logsumexp_d_shm[row]) * p_buff[row * BLOCK_SIZE_C + col] / sqrt_head_dim;
             }
         }
         __syncthreads();
 
-        // accum dQ_i
+        // dQ_i = sum_j(dS_ij @ K_j) - accumulated via atomics across K,V tiles
         #pragma unroll
         for(int x=tid; x < BLOCK_SIZE_R * HEAD_DIM; x += blockDim.x)
         {
-            int local_r = x / HEAD_DIM;  // Which row within the block [0, BLOCK_SIZE_R)
-            int local_h = x % HEAD_DIM;  // Which head dimension [0, head_dim)
+            int local_r = x / HEAD_DIM;
+            int local_h = x % HEAD_DIM;
 
-            // dQ_i computation - atomics
             int global_q_idx = i * BLOCK_SIZE_R + local_r;
 
             if (global_q_idx < seq_len) {
@@ -297,14 +300,13 @@ __global__ void flash_attention2_backward_kernel(
         }
         __syncthreads();
 
-        // accum dK_j
+        // dK_j = sum_i(dS_ij^T @ Q_i) - accumulated in shared mem across Q tiles
         #pragma unroll
         for(int x=tid; x < BLOCK_SIZE_C * HEAD_DIM; x += blockDim.x)
         {
-            int local_c = x / HEAD_DIM;  // Which row within the block [0, BLOCK_SIZE_C)
-            int local_h = x % HEAD_DIM;  // Which head dimension [0, head_dim)
+            int local_c = x / HEAD_DIM;
+            int local_h = x % HEAD_DIM;
 
-            // dK_j computation
             int global_kv_idx = KV_TILE_IDX * BLOCK_SIZE_C + local_c;
             float d_s_q_sum = 0.0f;
             #pragma unroll
@@ -321,6 +323,7 @@ __global__ void flash_attention2_backward_kernel(
         __syncthreads();
     }
 
+    // write accumulated dK, dV gradients to global memory
     #pragma unroll
     for(int x = tid; x < BLOCK_SIZE_C * HEAD_DIM; x += blockDim.x)
     {
@@ -329,19 +332,20 @@ __global__ void flash_attention2_backward_kernel(
         int global_kv_idx = KV_TILE_IDX * BLOCK_SIZE_C + local_c;
         if (global_kv_idx < seq_len) {
             int idx = base_hbm_offset + local_c * HEAD_DIM + local_h;
-            d_key[idx] = d_k_buff[local_c * HEAD_DIM + local_h]; 
+            d_key[idx] = d_k_buff[local_c * HEAD_DIM + local_h];
             d_value[idx] = d_v_buff[local_c * HEAD_DIM + local_h];
         }
     }
 }
 
+// D_i = rowsum(dO_i * O_i) - needed for softmax backward
 template<int HEAD_DIM>
 __global__ void D_computation_reduction_kernel(
-    const float *d_output, 
-    const float *output, 
-    int batch_size, 
-    int num_heads, 
-    int seq_len, 
+    const float *d_output,
+    const float *output,
+    int batch_size,
+    int num_heads,
+    int seq_len,
     float *D)
 {
     extern __shared__ float shmm[];
@@ -429,15 +433,14 @@ void host_flash_attention2_backward(
     const int BLOCK_SIZE_R = 32;
 
     printf("Computing D_i for backward pass...\n");
-    // const size_t threads_per_block_di = next_power_of_2(head_dim);
     const size_t threads_per_block_di = HEAD_DIM;
     const size_t total_blocks_di = batch_size * num_heads * seq_len;
     const size_t shared_mem_size_di = sizeof(float) * threads_per_block_di;
-    // tm->Start();
+    tm->Start();
     D_computation_reduction_kernel<HEAD_DIM><<<total_blocks_di, threads_per_block_di, shared_mem_size_di>>>(
         d_deriv_O, d_O, batch_size, num_heads, seq_len, d_D
     );
-    // tm->Stop();
+    tm->Stop();
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     
@@ -450,9 +453,9 @@ void host_flash_attention2_backward(
     const size_t num_threads_per_block = 256;
     // basically every block handles one tile of K,V so we parallelize over batch_size, num_heads and over seq len dimension!!! as opposed to flash-attn1
     // schema of blocks:
-    // [batch_0_head_0_qtile_0, batch_0_head_0_qtile_1, ..., batch_0_head_0_qtile_T_c, batch_0_head_1_qtile_0, ..., batch_0_head_1_qtile_T_c, ...
-    // ..., batch_0_head_(num_heads-1)_qtile_0, ..., batch_0_head_(num_heads-1)_qtile_T_c, ... another batch etc etc]
-    // each block handles ONE k,v tile, so every thread in block handles at least one element of that k,v tile (we have BLOCK_SIZE_C*HEAD_DIM elements in k,v tile e.g. 32*64=2048 elements, so with 128 threads each thread handles 16 elements of k,v tile)
+    // [batch_0_head_0_qtile_0, batch_0_head_0_kvtile_1, ..., batch_0_head_0_kvtile_T_c, batch_0_head_1_kvtile_0, ..., batch_0_head_1_kvtile_T_c, ...
+    // ..., batch_0_head_(num_heads-1)_kvtile_0, ..., batch_0_head_(num_heads-1)_kvtile_T_c, ... another batch etc etc]
+    // each block handles ONE k,v tile, so every thread in block handles at least one element of that k,v tile 
     const size_t shared_mem_size = sizeof(shm_t<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>);
     tm->Start();
     flash_attention2_backward_kernel<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>

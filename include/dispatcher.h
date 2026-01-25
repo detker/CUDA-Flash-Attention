@@ -134,6 +134,7 @@ struct RuntimeDimDispatcher<MaxD, MaxD>
         } 
         else 
         {
+            fprintf(stderr, "Error: Unsupported head dimension %d\n", head_dim);
             exit(EXIT_FAILURE);
         }
     }

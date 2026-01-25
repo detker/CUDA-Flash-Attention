@@ -16,18 +16,19 @@ __host__ __device__ __forceinline__ unsigned int next_power_of_2(unsigned int x)
     return x;
 }
 
+// shared memory layout for flash attention 2 backward pass (fp16)
 template<int BLOCK_SIZE_R, int BLOCK_SIZE_C, int HEAD_DIM>
 struct shm_t{
-    __half q_buff[BLOCK_SIZE_R*HEAD_DIM]; // for q tile and d_o tile
+    __half q_buff[BLOCK_SIZE_R*HEAD_DIM]; // q tile, then reused for d_o tile
     __half k_buff[BLOCK_SIZE_C*HEAD_DIM];
-    __half v_buff[BLOCK_SIZE_C*HEAD_DIM];
-    
-    __half d_k_buff[BLOCK_SIZE_C*HEAD_DIM];
-    __half d_v_buff[BLOCK_SIZE_C*HEAD_DIM];
+    __half v_buff[BLOCK_SIZE_C*HEAD_DIM]; // V transposed for dP @ V^T
 
-    __half logsumexp[BLOCK_SIZE_R]; // for logsumexp_i and d_i
+    __half d_k_buff[BLOCK_SIZE_C*HEAD_DIM]; // gradient accumulator for K
+    __half d_v_buff[BLOCK_SIZE_C*HEAD_DIM]; // gradient accumulator for V
 
-    __half p_buff[BLOCK_SIZE_R*BLOCK_SIZE_C]; // to store P_ij and dP_ij and S_ij
+    __half logsumexp[BLOCK_SIZE_R]; // logsumexp_i, then reused for D_i
+
+    __half p_buff[BLOCK_SIZE_R*BLOCK_SIZE_C]; // P_ij (recomputed), then dS_ij
 };
 
 template<int BLOCK_SIZE_R, int BLOCK_SIZE_C, int HEAD_DIM>
@@ -79,8 +80,7 @@ __global__ void flash_attention2_backward_kernel_fp16(
     __half2 *k_buff_h2 = reinterpret_cast<__half2 *>(k_buff);
     __half2 *d_k_buff_h2 = reinterpret_cast<__half2 *>(d_k_buff);
     __half2 *d_v_buff_h2 = reinterpret_cast<__half2 *>(d_v_buff);
-    // each block handles one k,v tile, so every thread in block handles at least one element of that k,v tile
-    // load kv tile into shm
+    // load K,V tile into shm (V is transposed for later dP @ V^T computation)
     #pragma unroll
     for (int x=tid; x < BLOCK_SIZE_C * HEAD_DIM / 2; x += blockDim.x)
     {
@@ -144,7 +144,7 @@ __global__ void flash_attention2_backward_kernel_fp16(
         }
         __syncthreads();
 
-        // compute S_ij, P_ij
+        // recompute S_ij = Q @ K^T / sqrt(d), then P_ij = softmax(S_ij)
         for (int row = warp_start_row; row < warp_end_row; ++row)
         {
             int global_q_idx = i * BLOCK_SIZE_R + row;
@@ -159,7 +159,6 @@ __global__ void flash_attention2_backward_kernel_fp16(
                 }
 
                 float dot_product = 0.0f;
-                // #pragma unroll
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; d+=2)
                 {
@@ -170,8 +169,9 @@ __global__ void flash_attention2_backward_kernel_fp16(
                     dot_product = __fmaf_rn(q_val_f2.x, k_val_f2.x, dot_product);
                     dot_product = __fmaf_rn(q_val_f2.y, k_val_f2.y, dot_product);
                 }
-                dot_product /= sqrt_head_dim; // scale
-                dot_product = __expf(dot_product - __half2float(logsumexp_d_shm[row])); // softmax
+                dot_product /= sqrt_head_dim;
+                // P_ij = exp(S_ij - logsumexp) = softmax(S_ij)
+                dot_product = __expf(dot_product - __half2float(logsumexp_d_shm[row]));
                 p_buff[row * BLOCK_SIZE_C + col] = __float2half(dot_product);
             }
         }
@@ -197,15 +197,16 @@ __global__ void flash_attention2_backward_kernel_fp16(
                 q_buff_h2[x] = make_half2(__float2half(0.0f), __float2half(0.0f));
             }
 
+            // load D_i = rowsum(dO * O) for dS computation
             if (local_col == 0) {
-                logsumexp_d_shm[local_row] = __float2half(d[BATCH_IDX * num_heads * seq_len + 
-                                                        HEAD_IDX * seq_len + 
+                logsumexp_d_shm[local_row] = __float2half(d[BATCH_IDX * num_heads * seq_len +
+                                                        HEAD_IDX * seq_len +
                                                         global_seq_idx]);
             }
         }
         __syncthreads();
 
-        // compute dV_j
+        // dV_j = sum_i(P_ij^T @ dO_i)
         #pragma unroll
         for(int x=tid; x < BLOCK_SIZE_C * HEAD_DIM; x += blockDim.x)
         {
@@ -229,6 +230,7 @@ __global__ void flash_attention2_backward_kernel_fp16(
         }
         __syncthreads();
 
+        // dS_ij = P_ij * (dP_ij - D_i) / sqrt(d), where dP_ij = dO @ V^T
         for (int row = warp_start_row; row < warp_end_row; ++row)
         {
             int global_q_idx = i * BLOCK_SIZE_R + row;
@@ -242,25 +244,26 @@ __global__ void flash_attention2_backward_kernel_fp16(
                     continue;
                 }
 
+                // dP_ij = dO @ V^T
                 float d_p_ij = 0.0f;
                 #pragma unroll
                 for (int d = 0; d < HEAD_DIM; ++d)
                 {
-                    d_p_ij += __half2float(d_o_buff[row * HEAD_DIM + d]) * __half2float(v_buff[d * BLOCK_SIZE_C + col]); 
+                    d_p_ij += __half2float(d_o_buff[row * HEAD_DIM + d]) * __half2float(v_buff[d * BLOCK_SIZE_C + col]);
                 }
+                // dS_ij = P_ij * (dP_ij - D_i) / sqrt(d)
                 p_buff[row * BLOCK_SIZE_C + col] = __float2half((d_p_ij - __half2float(logsumexp_d_shm[row])) * __half2float(p_buff[row * BLOCK_SIZE_C + col]) / sqrt_head_dim);
             }
         }
         __syncthreads();
 
-        // accum dQ_i
+        // dQ_i = sum_j(dS_ij @ K_j) - accumulated via atomics across K,V tiles
         #pragma unroll
         for(int x=tid; x < BLOCK_SIZE_R * HEAD_DIM; x += blockDim.x)
         {
-            int local_r = x / HEAD_DIM;  // Which row within the block [0, BLOCK_SIZE_R)
-            int local_h = x % HEAD_DIM;  // Which head dimension [0, head_dim)
+            int local_r = x / HEAD_DIM;
+            int local_h = x % HEAD_DIM;
 
-            // dQ_i computation - atomics
             int global_q_idx = i * BLOCK_SIZE_R + local_r;
 
             if (global_q_idx < seq_len) {
@@ -288,14 +291,13 @@ __global__ void flash_attention2_backward_kernel_fp16(
         }
         __syncthreads();
 
-        // accum dK_j
+        // dK_j = sum_i(dS_ij^T @ Q_i) - accumulated in shared mem across Q tiles
         #pragma unroll
         for(int x=tid; x < BLOCK_SIZE_C * HEAD_DIM; x += blockDim.x)
         {
-            int local_c = x / HEAD_DIM;  // Which row within the block [0, BLOCK_SIZE_C)
-            int local_h = x % HEAD_DIM;  // Which head dimension [0, head_dim)
+            int local_c = x / HEAD_DIM;
+            int local_h = x % HEAD_DIM;
 
-            // dK_j computation
             int global_kv_idx = KV_TILE_IDX * BLOCK_SIZE_C + local_c;
             float d_s_q_sum = 0.0f;
             #pragma unroll
@@ -312,6 +314,7 @@ __global__ void flash_attention2_backward_kernel_fp16(
         __syncthreads();
     }
 
+    // write accumulated dK, dV gradients to global memory
     #pragma unroll
     for(int x = tid; x < BLOCK_SIZE_C * HEAD_DIM; x += blockDim.x)
     {
@@ -320,12 +323,13 @@ __global__ void flash_attention2_backward_kernel_fp16(
         int global_kv_idx = KV_TILE_IDX * BLOCK_SIZE_C + local_c;
         if (global_kv_idx < seq_len) {
             int idx = base_hbm_offset + local_c * HEAD_DIM + local_h;
-            d_key[idx] = __half2float(d_k_buff[local_c * HEAD_DIM + local_h]); 
+            d_key[idx] = __half2float(d_k_buff[local_c * HEAD_DIM + local_h]);
             d_value[idx] = __half2float(d_v_buff[local_c * HEAD_DIM + local_h]);
         }
     }
 }
 
+// D_i = rowsum(dO_i * O_i) - needed for softmax backward
 template<int HEAD_DIM>
 __global__ void D_computation_reduction_kernel(
     const float *d_output, 
@@ -423,11 +427,11 @@ void host_flash_attention2_backward_fp16(
     const size_t threads_per_block_di = next_power_of_2(head_dim);
     const size_t total_blocks_di = batch_size * num_heads * seq_len;
     const size_t shared_mem_size_di = sizeof(float) * threads_per_block_di;
-    // tm->Start();
+    tm->Start();
     D_computation_reduction_kernel<HEAD_DIM><<<total_blocks_di, threads_per_block_di, shared_mem_size_di>>>(
         d_deriv_O, d_O, batch_size, num_heads, seq_len, d_D
     );
-    // tm->Stop();
+    tm->Stop();
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
     
@@ -438,11 +442,6 @@ void host_flash_attention2_backward_fp16(
     const size_t T_c = (seq_len + BLOCK_SIZE_C - 1) / BLOCK_SIZE_C;
     const size_t total_blocks = batch_size * num_heads * T_c;
     const size_t num_threads_per_block = 256;
-    // basically every block handles one tile of K,V so we parallelize over batch_size, num_heads and over seq len dimension!!! as opposed to flash-attn1
-    // schema of blocks:
-    // [batch_0_head_0_qtile_0, batch_0_head_0_qtile_1, ..., batch_0_head_0_qtile_T_c, batch_0_head_1_qtile_0, ..., batch_0_head_1_qtile_T_c, ...
-    // ..., batch_0_head_(num_heads-1)_qtile_0, ..., batch_0_head_(num_heads-1)_qtile_T_c, ... another batch etc etc]
-    // each block handles ONE k,v tile, so every thread in block handles at least one element of that k,v tile (we have BLOCK_SIZE_C*HEAD_DIM elements in k,v tile e.g. 32*64=2048 elements, so with 128 threads each thread handles 16 elements of k,v tile)
     const size_t shared_mem_size = sizeof(shm_t<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>);
     tm->Start();
     flash_attention2_backward_kernel_fp16<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>

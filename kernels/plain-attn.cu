@@ -37,7 +37,7 @@ __global__ void flash_attention2_forward_kernel(
     float *maxes_shm = (float*)(shm + sizeof(float)*BLOCK_SIZE_R*HEAD_DIM*2 + sizeof(float)*BLOCK_SIZE_C*HEAD_DIM*2 + sizeof(float)*BLOCK_SIZE_R*BLOCK_SIZE_C + sizeof(float)*BLOCK_SIZE_R);
     float *maxes_prev_shm = (float*)(shm + sizeof(float)*BLOCK_SIZE_R*HEAD_DIM*2 + sizeof(float)*BLOCK_SIZE_C*HEAD_DIM*2 + sizeof(float)*BLOCK_SIZE_R*BLOCK_SIZE_C + sizeof(float)*2*BLOCK_SIZE_R);
     
-    int tid = threadIdx.x; // thread id (each thread is assigned at least one element of q tile :>)
+    int tid = threadIdx.x; // thread id (each thread is assigned at least one element of q tile)
     const int T_r = (seq_len + BLOCK_SIZE_R - 1) / BLOCK_SIZE_R; //q,o
     const int T_c = (seq_len + BLOCK_SIZE_C - 1) / BLOCK_SIZE_C; //k,v
     
@@ -154,7 +154,6 @@ __global__ void flash_attention2_forward_kernel(
                 {
                     row_sum += s_buff[x * BLOCK_SIZE_C + col];
                 }
-                // l_prev = logsumexp_shm[x];
                 logsumexp_shm[x] = expf(maxes_prev_shm[x] - maxes_shm[x]) * logsumexp_shm[x] + row_sum;
             }
         }
@@ -192,12 +191,11 @@ __global__ void flash_attention2_forward_kernel(
             int idx = base_hbm_offset + local_row * HEAD_DIM + local_col;
             output[idx] = o_buff[local_row * HEAD_DIM + local_col] / logsumexp_shm[local_row];
 
-            // check correctness of that
             if(local_col == 0)
             {
-                logsumexp[BATCH_IDX * num_heads * seq_len + 
-                               HEAD_IDX * seq_len + 
-                               global_seq_idx] = logsumexp_shm[local_row];
+                logsumexp[BATCH_IDX * num_heads * seq_len +
+                               HEAD_IDX * seq_len +
+                               global_seq_idx] = __logf(logsumexp_shm[local_row]) + maxes_shm[local_row];
             }
         }
     }
@@ -228,7 +226,7 @@ void host_flash_attention2_forward(
     cudaMalloc(&d_K, qkv_size * sizeof(float));
     cudaMalloc(&d_V, qkv_size * sizeof(float));
     cudaMalloc(&d_O, qkv_size * sizeof(float));
-    //utils
+
     float *d_logsumexp;
     cudaMalloc(&d_logsumexp, batch_size * num_heads * seq_len * sizeof(float));
 
@@ -251,7 +249,7 @@ void host_flash_attention2_forward(
     // schema of blocks:
     // [batch_0_head_0_qtile_0, batch_0_head_0_qtile_1, ..., batch_0_head_0_qtile_T_r, batch_0_head_1_qtile_0, ..., batch_0_head_1_qtile_T_r, ...
     // ..., batch_0_head_(num_heads-1)_qtile_0, ..., batch_0_head_(num_heads-1)_qtile_T_r, ... another batch etc etc]
-    // each block handles ONE q tile, so every thread in block handles at least one element of that q tile (we have BLOCK_SIZE_R*HEAD_DIM elements in q tile e.g. 32*64=2048 elements, so with 128 threads each thread handles 16 elements of q tile)
+    // each block handles ONE q tile, so every thread in block handles at least one element of that q tile 
     const int shared_mem_size = sizeof(shm_t<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>);
     tm->Start();
     flash_attention2_forward_kernel<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>

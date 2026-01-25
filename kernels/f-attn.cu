@@ -93,7 +93,7 @@ __global__ void flash_attention_forward_kernel(
                 }
             }
             
-            // logsumexp and maxes load - we can do half threads loads logsumexp array and the other one maxes
+            // logsumexp and maxes load
             for(int x = tid; x < BLOCK_SIZE_R; x += blockDim.x)
             {
                 int local_row = x;
@@ -109,13 +109,12 @@ __global__ void flash_attention_forward_kernel(
                 }
             }
             __syncthreads();
-            // everything loaded into shm
 
             // float s_ij[BLOCK_SIZE_R*BLOCK_SIZE_C]; // register for s_ij
             float m_prev = 0.0f;  // max values for tid i, where i <= BLOCK_SIZE_R
             float l_prev = 0.0f;  // sum of exp for tid i, where i <= BLOCK_SIZE_R
             // float O_local[BLOCK_SIZE_R*HEAD_DIM];  // local output
-            // Compute attention for this (i,j) tile pair
+            // compute attention for this (i,j) tile pair
             for(int x=tid; x < BLOCK_SIZE_R * BLOCK_SIZE_C; x += blockDim.x)
             {
                 int local_row = x / BLOCK_SIZE_C;
@@ -129,19 +128,11 @@ __global__ void flash_attention_forward_kernel(
                 }
                 dot_product /= sqrtf((float)HEAD_DIM); // scale
 
-                // maxes_shm[local_row] = fmaxf(maxes_shm[local_row], dot_product); // update max_i - conflicts...
-                
-                // // Apply softmax scaling here if needed
-                // float scaled_dot = dot_product / sqrtf((float)head_dim);
-                
-                // // Update o_buff
-                // o_buff[local_row * BLOCK_SIZE_C + local_col] += dot_product;
-                // s_ij[local_row * BLOCK_SIZE_C + local_col] = dot_product;
                 s_buff[local_row * BLOCK_SIZE_C + local_col] = dot_product;
             }
 
             __syncthreads();
-            // max update - reduction (first BLOCK_SIZE_R threads participate only)
+            // max update - reduction 
             for(int x = tid; x < BLOCK_SIZE_R; x += blockDim.x)
             {
                 int global_row_idx = i * BLOCK_SIZE_R + x;
@@ -168,22 +159,16 @@ __global__ void flash_attention_forward_kernel(
                     float expval = expf(val - row_max);
                     row_l += expval;
                     s_buff[x * BLOCK_SIZE_C + col] = expval; // now s_buff have P values (local unnormalized softmax)
-                    // O_local[x * head_dim + col] = expval; // O_hat
                 } 
 
-                // float old_mi = maxes_shm[x]; 
                 m_prev = maxes_shm[x];
                 maxes_shm[x] = fmaxf(maxes_shm[x], row_max); //mi new
-                // float old_l = logsumexp_shm[x];
                 l_prev = logsumexp_shm[x];
                 logsumexp_shm[x] = expf(m_prev-maxes_shm[x])*l_prev + expf(row_max-maxes_shm[x])*row_l;
-                // m_prev[x] = old_mi;
-                // l_prev[x] = old_l;
 
                 for(int d = 0; d < HEAD_DIM; ++d)
                 {
                     // o_buff update
-                    // o_buff[x * BLOCK_SIZE_C + d] = expf(m_prev[x]-maxes_shm[x]) * o_buff[x * BLOCK_SIZE_C + d];
                     float o_curr = o_buff[x * HEAD_DIM + d];
                     o_curr = expf(m_prev - maxes_shm[x])*o_curr;
                     float s_sum = 0.0f;
@@ -191,22 +176,14 @@ __global__ void flash_attention_forward_kernel(
                     {
                         int global_col_idx = j * BLOCK_SIZE_C + col;
                         if (global_col_idx >= seq_len) continue;
-                        // o_curr += expf(rowmax-maxes_shm[x]) * s_buff[x * BLOCK_SIZE_C + col] * v_buff[col * HEAD_DIM + d];
                         s_sum += s_buff[x * BLOCK_SIZE_C + col] * v_buff[col * HEAD_DIM + d];
                     }
                     o_curr = l_prev * o_curr + expf(row_max-maxes_shm[x])*s_sum;
                     o_buff[x * HEAD_DIM + d] = o_curr/logsumexp_shm[x];
-                    // output[base_offset + (q_block_start + x) * HEAD_DIM + d] = o_buff[x * HEAD_DIM + d];
                     
                 }
 
-                // logsumexp[BATCH_IDX * (num_heads * seq_len) + HEAD_IDX * seq_len + (q_block_start + x)] = logsumexp_shm[x];
-                // maxes[BATCH_IDX * (num_heads * seq_len) + HEAD_IDX * seq_len + (q_block_start + x)] = maxes_shm[x];
-
-                // __syncthreads();
-
             }
-            // __syncthreads(); 
 
             for(int row = tid; row < BLOCK_SIZE_R; row += blockDim.x) {
                 int global_seq_idx = q_block_start + row;
@@ -220,8 +197,7 @@ __global__ void flash_attention_forward_kernel(
                     int stat_idx = BATCH_IDX * (num_heads * seq_len) + 
                                 HEAD_IDX * seq_len + global_seq_idx;
                     maxes[stat_idx] = maxes_shm[row];
-                    // logsumexp[stat_idx] = __logf(logsumexp_shm[row] + maxes_shm[row]);
-                    logsumexp[stat_idx] = logsumexp_shm[row]; // to avoid NaN
+                    logsumexp[stat_idx] = logsumexp_shm[row];
                 }
             }
             __syncthreads();
@@ -248,7 +224,6 @@ void host_flash_attention_forward(
     cudaGetDeviceProperties(&prop, device);
     
     size_t qkv_size = batch_size * num_heads * seq_len * head_dim;
-    // Allocate device memory
     const float *d_Q, *d_K, *d_V;
     float *d_O;
     cudaMalloc(&d_Q, qkv_size * sizeof(float));
@@ -256,13 +231,11 @@ void host_flash_attention_forward(
     cudaMalloc(&d_V, qkv_size * sizeof(float));
     cudaMalloc(&d_O, qkv_size * sizeof(float));
     cudaMemset(d_O, 0, qkv_size * sizeof(float));
-    //utils
     float *d_logsumexp, *d_maxes;
     cudaMalloc(&d_logsumexp, batch_size * num_heads * seq_len * sizeof(float));
     cudaMalloc(&d_maxes, batch_size * num_heads * seq_len * sizeof(float));
     cudaMemset(d_logsumexp, 0, batch_size * num_heads * seq_len * sizeof(float));
 
-    // Initialize maxes to -FLT_MAX
     float* h_maxes_init = new float[batch_size * num_heads * seq_len];
     for(int i = 0; i < batch_size * num_heads * seq_len; i++) {
         h_maxes_init[i] = -FLT_MAX;
@@ -270,18 +243,14 @@ void host_flash_attention_forward(
     cudaMemcpy(d_maxes, h_maxes_init, batch_size * num_heads * seq_len * sizeof(float), cudaMemcpyHostToDevice);
     delete[] h_maxes_init;
     
-    // Copy to device
     cudaMemcpy((void *)d_Q, h_Q, qkv_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy((void *)d_K, h_K, qkv_size * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy((void *)d_V, h_V, qkv_size * sizeof(float), cudaMemcpyHostToDevice);
     
-    // Run Flash Attention
     printf("Running Flash Attention...\n");
     printf("Batch: %d, Heads: %d, SeqLen: %d, HeadDim: %d\n", 
            batch_size, num_heads, seq_len, head_dim);
     
-    // const int block_size_c = (M + sizeof(float)*head_dim - 1) / (sizeof(float) * head_dim);
-    // const int block_size_r = std::min(block_size_c, head_dim);
     const size_t num_threads_per_block = 128;
     const int HEAD_DIM = head_dim;
     const int BLOCK_SIZE_C = 32;

@@ -4,15 +4,16 @@
 #define FLT_MAX 3.402823466e+38F
 #endif
 
+// shared memory layout for flash attention 2 forward pass
 template<int BM, int BN, int HEAD_DIM>
 struct shm_t{
-    float q_buff[BM*HEAD_DIM];
-    float kv_buff[BN*HEAD_DIM];
-    float s_buff[BM*BN];
-    float o_buff[BM*HEAD_DIM];
-    float logsumexp[BM];
-    float maxes[BM];
-    float exp_norm_coeffs[BM];
+    float q_buff[BM*HEAD_DIM];         // query tile
+    float kv_buff[BN*HEAD_DIM];        // key/value tile (reused)
+    float s_buff[BM*BN];               // attention scores S = Q @ K^T / sqrt(d) | softmax(S)
+    float o_buff[BM*HEAD_DIM];         // output accumulator
+    float logsumexp[BM];               // running sum of exp for normalization
+    float maxes[BM];                   // running max for numerical stability
+    float exp_norm_coeffs[BM];         // rescaling coefficients between tiles
 };
 
 template<int BLOCK_SIZE_R, int BLOCK_SIZE_C, int HEAD_DIM, int BK, int TM, int TN>
@@ -75,6 +76,7 @@ __global__ void flash_attention2_forward_kernel(
 
         if(local_col == 0 && local_row < BLOCK_SIZE_R)
         {
+            // init online softmax state per row
             logsumexp_shm[local_row] = 0.0f;
             maxes_shm[local_row] = -FLT_MAX;
             o_buff[local_row * HEAD_DIM] = 0.0f; 
@@ -209,12 +211,13 @@ __global__ void flash_attention2_forward_kernel(
                 row_max = fmaxf(row_max, __shfl_xor_sync(0xFFFFFFFF, row_max, offset));
             }
 
+            // online softmax: update max and compute rescaling factor
             float new_max = 0.0f;
             float coeff = 0.0f;
             if (LANE_ID == 0)
             {
                 new_max = fmaxf(maxes_shm[row], row_max);
-                coeff = __expf(maxes_shm[row] - new_max);
+                coeff = __expf(maxes_shm[row] - new_max);  // rescale previous contributions
                 maxes_shm[row] = new_max;
                 exp_norm_coeffs[row] = coeff;
             }
@@ -243,6 +246,7 @@ __global__ void flash_attention2_forward_kernel(
                 row_sum += __shfl_xor_sync(0xFFFFFFFF, row_sum, offset);
             }
 
+            // update running sum with rescaled previous sum + new tile sum
             if (LANE_ID == 0)
             {
                 logsumexp_shm[row] = coeff * logsumexp_shm[row] + row_sum;
@@ -287,8 +291,9 @@ __global__ void flash_attention2_forward_kernel(
             unsigned int global_seq_idx = Q_TILE_IDX * BLOCK_SIZE_R + row;
             if (global_seq_idx >= seq_len) continue;
 
+            // rescale previous output and accumulate new: O = O * coeff + P @ V
             float coeff = exp_norm_coeffs[row];
-            
+
             #pragma unroll
             for (unsigned int dIdx = threadCol * BK; dIdx < HEAD_DIM; dIdx += (BLOCK_SIZE_C / TN) * BK) {
                 float accum[BK] = {0.0f};
@@ -325,14 +330,16 @@ __global__ void flash_attention2_forward_kernel(
         int local_row = x / HEAD_DIM;
         int local_col = x % HEAD_DIM;
         int global_seq_idx = Q_TILE_IDX * BLOCK_SIZE_R + local_row;
+        // final normalization: divide by sum of exp weights
         if (global_seq_idx < seq_len) {
             int idx = base_hbm_offset + local_row * HEAD_DIM + local_col;
             output[idx] = o_buff[local_row * HEAD_DIM + local_col] / logsumexp_shm[local_row];
 
+            // store log(sum(exp)) + max for backward pass
             if(local_col == 0 && global_seq_idx < seq_len)
             {
-                logsumexp[BATCH_IDX * num_heads * seq_len + 
-                               HEAD_IDX * seq_len + 
+                logsumexp[BATCH_IDX * num_heads * seq_len +
+                               HEAD_IDX * seq_len +
                                global_seq_idx] = __logf(logsumexp_shm[local_row]) + maxes_shm[local_row];
             }
         }
@@ -386,8 +393,7 @@ void host_flash_attention2_forward(
     
     const size_t T_r = (seq_len + BLOCK_SIZE_R - 1) / BLOCK_SIZE_R;
     const size_t total_blocks = batch_size * num_heads * T_r;
-    // const size_t num_threads_per_block = (BLOCK_SIZE_R * BLOCK_SIZE_C) / (TM * TN);
-    const size_t num_threads_per_block = 128;
+    const size_t num_threads_per_block = 256;
     
     const int shared_mem_size = sizeof(shm_t<BLOCK_SIZE_R, BLOCK_SIZE_C, HEAD_DIM>);
     

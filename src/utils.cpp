@@ -29,18 +29,24 @@ void save_binary_file(const char* filename, const float* data, size_t size) {
 }
 
 
-void parse_config_string(const char* config_str, int* batch_size, int* num_heads, int* seq_len, int* head_dim) {
-    const char* folder_name = strrchr(config_str, '/');
-    if (folder_name) {
-        folder_name++; // skip the last '/'
-    } else {
-        folder_name = config_str; // no path separator, use the whole string
-    }
-    
-    int parsed = sscanf(folder_name, "B%d_H%d_S%d_D%d", batch_size, num_heads, seq_len, head_dim);
-    if (parsed != 4) ERR("sscanf");
-}
+void parse_config_string(const char* config_str, int* batch_size, int* num_heads, int* seq_len, int* head_dim) {      
+    const char* folder_name = config_str;                                                                             
+    size_t len = strlen(config_str);                                                                                  
+                                                                                                                    
+    while (len > 0 && config_str[len - 1] == '/') {                                                                   
+        len--;                                                                                                        
+    }                                                                                                                 
+                                                                                                                    
+    for (size_t i = len; i > 0; i--) {                                                                                
+        if (config_str[i - 1] == '/') {                                                                               
+            folder_name = config_str + i;                                                                             
+            break;                                                                                                    
+        }                                                                                                             
+    }                                                                                                                 
 
+    int parsed = sscanf(folder_name, "B%d_H%d_S%d_D%d", batch_size, num_heads, seq_len, head_dim);                    
+    if (parsed != 4) ERR("sscanf");                                                                                   
+} 
 
 
 void parse_args(int argc, char** argv, ComputeDataType* compute_data_type, ComputeType* compute_method, ModeType* mode, char** data_path)
